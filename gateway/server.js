@@ -31,6 +31,51 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+// --- Symmetric Encryption & Decryption Helpers ---
+const ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 12;
+
+function getEncryptionKey() {
+  const secret = process.env.ENCRYPTION_KEY || process.env.ADMIN_API_KEY || 'veeam-gateway-default-fallback-key-2026';
+  return crypto.createHash('sha256').update(secret).digest();
+}
+
+function encrypt(text) {
+  if (!text) return '';
+  const iv = crypto.randomBytes(IV_LENGTH);
+  const key = getEncryptionKey();
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag().toString('hex');
+  return `${iv.toString('hex')}:${authTag}:${encrypted}`;
+}
+
+function decrypt(cipherText) {
+  if (!cipherText) return '';
+  const parts = cipherText.split(':');
+  if (parts.length !== 3) {
+    // Legacy plaintext fallback
+    return cipherText;
+  }
+  
+  const [ivHex, authTagHex, encryptedHex] = parts;
+  try {
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+    const encrypted = Buffer.from(encryptedHex, 'hex');
+    const key = getEncryptionKey();
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch (err) {
+    console.warn('[SECURITY] Failed to decrypt value. Falling back to treating as plaintext.', err.message);
+    return cipherText;
+  }
+}
+
 // Promisified DB calls
 const dbRun = (query, params = []) => {
   return new Promise((resolve, reject) => {
@@ -72,7 +117,18 @@ async function loadVeeamConfigFromDb() {
     for (const row of rows) {
       if (row.key === 'veeam_url') veeamConfig.url = row.value;
       if (row.key === 'veeam_username') veeamConfig.username = row.value;
-      if (row.key === 'veeam_password') veeamConfig.password = row.value;
+      if (row.key === 'veeam_password') {
+        const decrypted = decrypt(row.value);
+        veeamConfig.password = decrypted;
+        
+        // Auto-migration: if the stored database value was legacy plaintext, update it to encrypted format
+        if (decrypted && decrypted === row.value && !row.value.includes(':')) {
+          const encryptedValue = encrypt(decrypted);
+          dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue])
+            .then(() => console.log('[CONFIG] Legacy plaintext Veeam password automatically migrated to encrypted format in DB.'))
+            .catch(err => console.error('[CONFIG] Failed to migrate legacy password:', err.message));
+        }
+      }
     }
     console.log('[CONFIG] Veeam connection config loaded from DB. URL:', veeamConfig.url || 'Not set');
   } catch (err) {
@@ -94,7 +150,10 @@ async function initDb() {
   if (configCount.count === 0) {
     if (process.env.VEEAM_API_URL) await dbRun('INSERT INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_url', process.env.VEEAM_API_URL]);
     if (process.env.VEEAM_USERNAME) await dbRun('INSERT INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_username', process.env.VEEAM_USERNAME]);
-    if (process.env.VEEAM_PASSWORD) await dbRun('INSERT INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', process.env.VEEAM_PASSWORD]);
+    if (process.env.VEEAM_PASSWORD) {
+      const encryptedValue = encrypt(process.env.VEEAM_PASSWORD);
+      await dbRun('INSERT INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue]);
+    }
     console.log('[DB] Seeded veeam_config from environment variables');
   }
 
@@ -429,16 +488,26 @@ app.get('/api/status', authenticateApiKey, async (req, res) => {
   if (veeamConfig.url) {
     try {
       const token = await getVeeamToken();
-      // Test connectivity by calling Veeam's jobs endpoint (GET /api/v1/jobs?limit=1)
-      await axios.get(`${veeamConfig.url}/api/v1/jobs?limit=1`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'x-api-version': '1.3-rev1',
-        },
-        httpsAgent,
-        timeout: 3000 // Check connectivity quickly
-      });
-      status.connectionStatus = 'Connected';
+      // Test connectivity by calling Veeam's repositories endpoint (accessible to more roles)
+      try {
+        await axios.get(`${veeamConfig.url}/api/v1/backupInfrastructure/repositories?limit=1`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'x-api-version': '1.3-rev1',
+          },
+          httpsAgent,
+          timeout: 3000 // Check connectivity quickly
+        });
+        status.connectionStatus = 'Connected';
+      } catch (pingErr) {
+        // If we get a 403 Forbidden, it means we successfully authenticated and contacted the Veeam server,
+        // but the token's role lacks query permissions for this endpoint. This still confirms connectivity.
+        if (pingErr.response?.status === 403) {
+          status.connectionStatus = 'Connected';
+        } else {
+          throw pingErr;
+        }
+      }
     } catch (err) {
       status.error = err.response?.data?.message || err.message;
       status.connectionStatus = 'Error';
@@ -618,7 +687,8 @@ app.post('/api/config', authenticateApiKey, async (req, res) => {
     
     // Only update password if provided and not masked placeholder
     if (password && password !== '******') {
-      await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', password]);
+      const encryptedValue = encrypt(password);
+      await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue]);
     }
     
     // Reload config in memory

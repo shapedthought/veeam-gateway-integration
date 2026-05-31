@@ -7,16 +7,18 @@ This is the secure proxy gateway that mediates connections between clients (like
 The application is containerized using a multi-stage Docker build that compiles the React SPA frontend and serves it via the Express backend.
 
 ### 1. Configure Connection Settings
-Before building, create an `.env` configuration file in this directory to declare your Veeam credentials:
+Before building, create an `.env` configuration file in this directory to declare your Veeam credentials and encryption settings:
 
 ```bash
 VEEAM_API_URL=https://192.168.0.238:9419
 VEEAM_USERNAME=your_veeam_user
 VEEAM_PASSWORD=your_veeam_password
 ADMIN_API_KEY=veeam_vproxy_my_custom_admin_key_12345
+ENCRYPTION_KEY=my_secure_symmetric_encryption_key_here
 ```
 > [!NOTE]
-> If you omit `ADMIN_API_KEY`, a random one will be generated at startup and printed to the container logs (`docker logs veeam-gateway`).
+> - If you omit `ADMIN_API_KEY`, a random one will be generated at startup and printed to the container logs (`docker logs veeam-gateway`).
+> - The `ENCRYPTION_KEY` is optional but highly recommended to encrypt stored passwords in the SQLite database. If omitted, the `ADMIN_API_KEY` (or a static default) is used as a fallback.
 
 ---
 
@@ -101,9 +103,11 @@ The gateway is built from the ground up to act as a secure boundary shielding yo
 
 ### 2. Configuration & Password Storage
 Connection settings can be initialized via environment variables (`.env`) or modified dynamically in the dashboard UI.
-* **SQLite Database**: Dynamic settings are persisted in the `veeam_config` table inside `database.sqlite` (located at `/data` in production container mounts).
+* **Symmetric Encryption (AES-256-GCM)**: To protect credentials on-disk, the Veeam password is encrypted in the SQLite database using authenticated AES-256-GCM encryption. The stored format is `iv:authTag:ciphertext`.
+* **Master Key Derivation**: The encryption key is derived using a SHA-256 hash of the `ENCRYPTION_KEY` environment variable. If `ENCRYPTION_KEY` is not set, `ADMIN_API_KEY` is used as a fallback, followed by a static key.
+* **Auto-Migration of Legacy Credentials**: The gateway maintains backward compatibility with older gateway setups. Upon server startup, if a plaintext (unencrypted) password is found in the database, the gateway reads it, automatically encrypts it using the current key, and updates the database row.
 * **Zero-Leak GET API**: The API endpoint to retrieve settings (`GET /api/config`) is restricted to the **Admin** role. For security, it **never returns the password** in plaintext; it only returns a boolean flag (`hasPassword: true`) to let the frontend know a password is set.
-* **Securing the DB Volume**: Since the credentials are readable by the Node process inside the container, the SQLite database file contains the Veeam credentials. Ensure the volume host directory (or Docker/Podman volume) is protected with strict filesystem permissions (e.g., `chmod 700` and restricted ownership to the container runtime user).
+* **Securing the DB Volume**: While the credentials are encrypted at rest, they are readable by the Node process inside the container. Ensure the volume host directory (or Docker/Podman volume) is protected with strict filesystem permissions (e.g., `chmod 700` and restricted ownership to the container runtime user).
 
 ### 3. Middleware Security Layers
 Every request routed through the `/veeam/*` proxy endpoint undergoes three successive validation checks:
