@@ -4,8 +4,10 @@ This repository contains a complete solution to securely integrate an AI Assista
 
 ## Repository Structure
 
-- **`gateway/`**: The secure proxy gateway deployed on the Atelier platform. It manages credentials, token caching, global blocklist rules, Role-Based Access Control (RBAC), and logs audit events to an SQLite database.
+- **`gateway/`**: The secure proxy gateway deployed on the Atelier platform (or runnable locally with Docker/Podman). It manages credentials, token caching, global blocklist rules, Role-Based Access Control (RBAC), and logs audit events to an SQLite database. 
+  - *See [gateway/README.md](gateway/README.md) for local container running instructions.*
 - **`skills/veeam-v13/`**: The custom AI skill directory that equips the agent with instructions and a local schema search tool (`veeam_search.py` + `swagger.json`) to find and call Veeam endpoints securely.
+  - *See [skills/veeam-v13/SKILL.md](skills/veeam-v13/SKILL.md) for agent usage guides.*
 
 ## Setup Instructions
 
