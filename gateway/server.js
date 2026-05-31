@@ -672,6 +672,11 @@ app.get('/api/config', authenticateApiKey, async (req, res) => {
   });
 });
 
+// Serve Swagger Schema (available to all authenticated API keys)
+app.get('/api/swagger.json', authenticateApiKey, (req, res) => {
+  res.sendFile(path.join(__dirname, 'swagger.json'));
+});
+
 // Update Veeam Connection Settings (Admin only)
 app.post('/api/config', authenticateApiKey, async (req, res) => {
   if (req.keyInfo.role !== 'Admin') {

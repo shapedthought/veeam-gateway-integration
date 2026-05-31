@@ -7,8 +7,8 @@ SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 swagger_path = os.path.join(SKILL_DIR, "swagger.json")
 
 if not os.path.exists(swagger_path):
-    # Fallback to absolute downloads path for local testing
-    swagger_path = "/Users/edwardhoward/Downloads/swagger.json"
+    # Fallback to current working directory
+    swagger_path = "swagger.json"
 
 try:
     with open(swagger_path, "r", encoding="utf-8") as f:
@@ -178,11 +178,12 @@ def inspect_endpoint(method, target_path):
 def print_help():
     print("Veeam REST API Swagger Helper")
     print("Usage:")
-    print("  python3 veeam_search.py search <query>           - Search for endpoints")
-    print("  python3 veeam_search.py inspect <method> <path>  - Inspect an endpoint schema")
+    print("  python3 veeam_search.py search <query>                    - Search for endpoints")
+    print("  python3 veeam_search.py inspect [<method>] <path_pattern> - Inspect an endpoint schema")
     print("Examples:")
     print("  python3 veeam_search.py search jobs")
     print("  python3 veeam_search.py inspect POST /api/v1/jobs")
+    print("  python3 veeam_search.py inspect /api/v1/backupInfrastructure/repositories")
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
@@ -193,11 +194,43 @@ if __name__ == "__main__":
     if action == "search":
         search_swagger(sys.argv[2])
     elif action == "inspect":
-        if len(sys.argv) < 4:
-            print("Error: inspect requires both HTTP method and API path.")
-            print("Example: python3 veeam_search.py inspect POST /api/v1/jobs")
+        if len(sys.argv) == 3:
+            # Only one parameter passed to inspect -> treat as path and auto-detect method
+            target_path = sys.argv[2]
+            paths = swagger_data.get("paths", {})
+            matched_path = None
+            
+            # Exact match
+            for p in paths.keys():
+                if p.strip().lower() == target_path.strip().lower():
+                    matched_path = p
+                    break
+            # Fuzzy match
+            if not matched_path:
+                for p in paths.keys():
+                    if target_path.strip().lower() in p.strip().lower():
+                        matched_path = p
+                        break
+            
+            if not matched_path:
+                print(f"Path '{target_path}' not found in Swagger.")
+                sys.exit(1)
+                
+            available = [m.upper() for m in paths[matched_path].keys() if m in ["get", "post", "put", "delete", "patch"]]
+            if not available:
+                print(f"No valid HTTP methods found for path '{matched_path}'.")
+                sys.exit(1)
+                
+            # Prefer GET if available, otherwise pick the first method
+            method = "GET" if "GET" in available else available[0]
+            print(f"Auto-detected HTTP method: {method} (Available: {available})")
+            inspect_endpoint(method, matched_path)
+            
+        elif len(sys.argv) >= 4:
+            inspect_endpoint(sys.argv[2], sys.argv[3])
+        else:
+            print_help()
             sys.exit(1)
-        inspect_endpoint(sys.argv[2], sys.argv[3])
     else:
         print_help()
         sys.exit(1)
