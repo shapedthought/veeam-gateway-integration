@@ -1,0 +1,6 @@
+gateway/node_modules/
+gateway/dist/
+gateway/database.sqlite
+gateway/.env
+.DS_Store
+*.log
