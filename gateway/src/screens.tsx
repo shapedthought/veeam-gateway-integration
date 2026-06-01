@@ -1,5 +1,5 @@
 // Veeam Gateway — Enterprise Console screens, modals and helpers.
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { FormEvent } from 'react';
 import { Icon } from './icons.tsx';
 import { DashGrid } from './DashGrid.tsx';
@@ -108,6 +108,11 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [userId, setUserId] = useState(ctx.users[0] ? ctx.users[0].id : '');
+  // Keep userId bound to a real user: if users load after mount (or the current
+  // selection is removed), snap to the first user so the <select> value and state agree.
+  useEffect(() => {
+    if (ctx.users.length && !ctx.users.some((u) => u.id === userId)) setUserId(ctx.users[0].id);
+  }, [ctx.users]); // eslint-disable-line react-hooks/exhaustive-deps
   const [ips, setIps] = useState('');
   const [exp, setExp] = useState('');
   const submit = (e: FormEvent) => { e.preventDefault(); if (!name.trim()) return; ctx.createKey({ name, userId, ips, exp }); setName(''); setIps(''); setExp(''); setOpen(false); };
@@ -221,6 +226,11 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
   const [section, setSection] = useState<'groups' | 'global'>('groups');
   const [sel, setSel] = useState(ctx.groups[0] ? ctx.groups[0].id : '');
   const group = ctx.groups.find((g) => g.id === sel) || ctx.groups[0];
+  // Keep the selection valid as groups load/refetch (e.g. after a delete) so the
+  // <select> value and state stay in sync without manual re-selection on each action.
+  useEffect(() => {
+    if (ctx.groups.length && !ctx.groups.some((g) => g.id === sel)) setSel(ctx.groups[0].id);
+  }, [ctx.groups]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [eff, setEff] = useState<'ALLOW' | 'DENY'>('ALLOW');
   const [meth, setMeth] = useState('*');
@@ -256,7 +266,7 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                   </div>
                   <p className="lead" style={{ marginTop: 12 }}>{group.description}</p>
                 </div>
-                {group.name !== 'Administrators' ? <button className="btn danger sm" onClick={() => { ctx.deleteGroup(group.id); if (ctx.groups[0]) setSel(ctx.groups[0].id); }}>Delete Group</button> : null}
+                {group.name !== 'Administrators' ? <button className="btn danger sm" onClick={() => ctx.deleteGroup(group.id)}>Delete Group</button> : null}
               </div>
 
               <div className="tbl-wrap"><table className="tbl" style={{ marginBottom: 22 }}>
