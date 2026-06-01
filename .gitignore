@@ -4,3 +4,5 @@ gateway/database.sqlite
 gateway/.env
 .DS_Store
 *.log
+# transient git askpass helper written by push_to_atelier.sh — must never be committed (contains/echoes the API token)
+.git_askpass.sh

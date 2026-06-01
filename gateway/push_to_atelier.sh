@@ -10,13 +10,17 @@ if [ -z "$ATELIER_API_TOKEN" ]; then
   exit 1
 fi
 
-# Create custom askpass helper inside workspace
-ASKPASS_PATH="$(pwd)/.git_askpass.sh"
-echo '#!/bin/sh' > "$ASKPASS_PATH"
-echo "echo \"$ATELIER_API_TOKEN\"" >> "$ASKPASS_PATH"
+# Create the git askpass helper OUTSIDE the repo (mktemp) so it can never be
+# swept into a commit by `git add -A` — that is how the token leaked before.
+# The helper echoes the env var by name, so the token itself is never written
+# to disk; the EXIT trap removes the file even if the script fails midway.
+ASKPASS_PATH="$(mktemp)"
+trap 'rm -f "$ASKPASS_PATH"' EXIT
+printf '#!/bin/sh\necho "$ATELIER_API_TOKEN"\n' > "$ASKPASS_PATH"
 chmod +x "$ASKPASS_PATH"
 
 export GIT_ASKPASS="$ASKPASS_PATH"
+export ATELIER_API_TOKEN   # make the token visible to the askpass subprocess
 export DISPLAY=dummy
 
 # Initialize and configure git
@@ -34,5 +38,4 @@ git commit -m "Deploy Veeam Proxy to Atelier"
 echo "Pushing code to Atelier..."
 git push -f atelier master:main
 
-# Clean up askpass helper
-rm "$ASKPASS_PATH"
+# askpass helper is removed automatically by the EXIT trap set above
