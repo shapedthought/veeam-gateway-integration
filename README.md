@@ -8,6 +8,8 @@ This repository contains a complete solution to securely integrate an AI Assista
   - *See [gateway/README.md](gateway/README.md) for local container running instructions.*
 - **`skills/veeam-v13/`**: The custom AI skill directory that equips the agent with instructions and a local schema search tool (`veeam_search.py` + `swagger.json`) to find and call Veeam endpoints securely.
   - *See [skills/veeam-v13/SKILL.md](skills/veeam-v13/SKILL.md) for agent usage guides.*
+- **`spec.md`**: A stack-agnostic **build specification** — the interface contract and security invariants of the gateway and skill — for anyone who wants to build their own version of the tool instead of running the pre-baked reference implementation.
+  - *See [spec.md](spec.md) to reimplement in your own stack.*
 
 ## Setup Instructions
 
