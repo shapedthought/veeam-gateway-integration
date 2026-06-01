@@ -136,6 +136,19 @@ async function loadVeeamConfigFromDb() {
   }
 }
 
+async function addColumnIfMissing(table, column, type) {
+  try {
+    await dbRun(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    console.log(`[DB] Column ${column} added to table ${table}`);
+  } catch (err) {
+    if (err.message.includes('duplicate column name') || err.message.includes('already exists')) {
+      // Column already exists, safe to ignore
+    } else {
+      console.warn(`[DB] Warning: could not add column ${column} to table ${table}:`, err.message);
+    }
+  }
+}
+
 // Database Initialization
 async function initDb() {
   await dbRun(`
@@ -160,15 +173,59 @@ async function initDb() {
   // Load configuration into memory
   await loadVeeamConfigFromDb();
 
+  // Create Users & Groups tables
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      email TEXT,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT
+    )
+  `);
+
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS group_rules (
+      id TEXT PRIMARY KEY,
+      group_id TEXT NOT NULL,
+      effect TEXT NOT NULL,
+      method TEXT NOT NULL,
+      path_pattern TEXT NOT NULL,
+      description TEXT,
+      FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
+    )
+  `);
+
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS user_groups (
+      user_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, group_id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(group_id) REFERENCES groups(id) ON DELETE CASCADE
+    )
+  `);
+
   await dbRun(`
     CREATE TABLE IF NOT EXISTS api_keys (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      user_id TEXT,
       token_hash TEXT NOT NULL UNIQUE,
       token_masked TEXT NOT NULL,
-      role TEXT NOT NULL,
+      role TEXT,
       status TEXT NOT NULL DEFAULT 'active',
-      created_at TEXT NOT NULL
+      expires_at TEXT,
+      allowed_ips TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
     )
   `);
 
@@ -191,9 +248,57 @@ async function initDb() {
       method TEXT NOT NULL,
       path TEXT NOT NULL,
       status_code INTEGER,
-      message TEXT
+      message TEXT,
+      client_ip TEXT,
+      action TEXT,
+      resource TEXT
     )
   `);
+
+  // Dynamic alter-table migrations for existing DBs
+  await addColumnIfMissing('api_keys', 'user_id', 'TEXT');
+  await addColumnIfMissing('api_keys', 'expires_at', 'TEXT');
+  await addColumnIfMissing('api_keys', 'allowed_ips', 'TEXT');
+  await addColumnIfMissing('audit_logs', 'client_ip', 'TEXT');
+  await addColumnIfMissing('audit_logs', 'action', 'TEXT');
+  await addColumnIfMissing('audit_logs', 'resource', 'TEXT');
+
+  // Seed default admin user
+  const userCount = await dbGet('SELECT count(*) as count FROM users');
+  if (userCount.count === 0) {
+    const adminId = 'admin-user-id-000000000000000000000000';
+    await dbRun('INSERT OR IGNORE INTO users (id, username, email, created_at) VALUES (?, ?, ?, ?)', [
+      adminId, 'admin', 'admin@local', new Date().toISOString()
+    ]);
+    console.log('[DB] Seeded default admin user');
+  }
+
+  // Seed default Administrators group & wildcard ALLOW rule
+  const groupCount = await dbGet('SELECT count(*) as count FROM groups');
+  if (groupCount.count === 0) {
+    const adminGroupId = 'admin-group-id-0000000000000000000000';
+    await dbRun('INSERT OR IGNORE INTO groups (id, name, description) VALUES (?, ?, ?)', [
+      adminGroupId, 'Administrators', 'System administrators with full wildcard access'
+    ]);
+    
+    await dbRun('INSERT OR IGNORE INTO group_rules (id, group_id, effect, method, path_pattern, description) VALUES (?, ?, ?, ?, ?, ?)', [
+      'admin-rule-id-wildcard-0000000000000', adminGroupId, 'ALLOW', '*', '*', 'Allow all endpoints'
+    ]);
+
+    const adminUser = await dbGet("SELECT id FROM users WHERE username = 'admin'");
+    if (adminUser) {
+      await dbRun('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?, ?)', [
+        adminUser.id, adminGroupId
+      ]);
+    }
+    console.log('[DB] Seeded default Administrators group, rules, and linked admin user');
+  }
+
+  // Link all existing keys that have empty user_id to admin user
+  const adminUser = await dbGet("SELECT id FROM users WHERE username = 'admin'");
+  if (adminUser) {
+    await dbRun('UPDATE api_keys SET user_id = ? WHERE user_id IS NULL OR user_id = ?', [adminUser.id, '']);
+  }
 
   // Seed default global rule to block DELETE if empty
   const ruleCount = await dbGet('SELECT count(*) as count FROM global_rules');
@@ -213,10 +318,11 @@ async function initDb() {
     const defaultMasked = defaultToken.substring(0, 13) + '...' + defaultToken.substring(defaultToken.length - 4);
     const keyId = crypto.randomUUID();
     const now = new Date().toISOString();
+    const keyUserId = adminUser ? adminUser.id : 'admin-user-id-000000000000000000000000';
 
     await dbRun(
-      'INSERT INTO api_keys (id, name, token_hash, token_masked, role, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [keyId, 'Default Admin', defaultHash, defaultMasked, 'Admin', 'active', now]
+      'INSERT INTO api_keys (id, name, user_id, token_hash, token_masked, role, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [keyId, 'Default Admin', keyUserId, defaultHash, defaultMasked, 'Admin', 'active', now]
     );
 
     console.log('\n==================================================');
@@ -228,13 +334,83 @@ async function initDb() {
   }
 }
 
+// Action & Resource Parser Helper for Audit Logs
+function parseVeeamActionAndResource(method, veeamPath) {
+  let action = `${method.toUpperCase()}_API_PATH`;
+  let resource = 'General';
+
+  // Normalize path by removing trailing slash
+  const cleanPath = veeamPath.endsWith('/') ? veeamPath.slice(0, -1) : veeamPath;
+
+  if (cleanPath.startsWith('/api/v1/jobs')) {
+    const parts = cleanPath.split('/');
+    if (parts.length === 5 && cleanPath.endsWith('/start')) {
+      action = 'START_JOB';
+      resource = `Job ID: ${parts[3]}`;
+    } else if (parts.length === 5 && cleanPath.endsWith('/stop')) {
+      action = 'STOP_JOB';
+      resource = `Job ID: ${parts[3]}`;
+    } else if (parts.length === 5 && cleanPath.endsWith('/retry')) {
+      action = 'RETRY_JOB';
+      resource = `Job ID: ${parts[3]}`;
+    } else if (method === 'GET' && parts.length === 4) {
+      action = 'GET_JOB';
+      resource = `Job ID: ${parts[3]}`;
+    } else if (method === 'GET') {
+      action = 'LIST_JOBS';
+      resource = 'All Jobs';
+    } else if (method === 'POST') {
+      action = 'CREATE_JOB';
+      resource = 'New Job';
+    } else if (method === 'PUT') {
+      action = 'UPDATE_JOB';
+      resource = `Job ID: ${parts[3]}`;
+    } else if (method === 'DELETE') {
+      action = 'DELETE_JOB';
+      resource = `Job ID: ${parts[3]}`;
+    }
+  } else if (cleanPath.startsWith('/api/v1/backupInfrastructure/repositories')) {
+    const parts = cleanPath.split('/');
+    if (method === 'GET' && parts.length === 5) {
+      action = 'GET_REPOSITORY';
+      resource = `Repo ID: ${parts[4]}`;
+    } else if (method === 'GET') {
+      action = 'LIST_REPOSITORIES';
+      resource = 'All Repositories';
+    } else if (method === 'POST') {
+      action = 'ADD_REPOSITORY';
+      resource = 'New Repository';
+    } else if (method === 'DELETE') {
+      action = 'REMOVE_REPOSITORY';
+      resource = `Repo ID: ${parts[4]}`;
+    }
+  } else if (cleanPath.startsWith('/api/v1/backupObjects')) {
+    action = 'GET_BACKUP_OBJECTS';
+    resource = 'Backup Objects';
+  } else if (cleanPath.startsWith('/api/status')) {
+    action = 'CHECK_STATUS';
+    resource = 'Gateway Status';
+  } else if (cleanPath.startsWith('/api/config')) {
+    action = 'UPDATE_CONFIG';
+    resource = 'Veeam Credentials';
+  }
+
+  return { action, resource };
+}
+
 // Audit logger helper
-async function logOperation(keyId, keyName, method, path, statusCode, message) {
+async function logOperation(keyId, keyName, method, path, statusCode, message, req = null) {
   const now = new Date().toISOString();
+  const clientIp = req ? getClientIp(req) : 'SYSTEM';
+
+  // Normalize path
+  const veeamPath = path.startsWith('/veeam') ? path.substring(6) : path;
+  const { action, resource } = parseVeeamActionAndResource(method, veeamPath);
+
   try {
     await dbRun(
-      'INSERT INTO audit_logs (timestamp, key_id, key_name, method, path, status_code, message) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [now, keyId || 'SYSTEM', keyName || 'SYSTEM', method, path, statusCode, message]
+      'INSERT INTO audit_logs (timestamp, key_id, key_name, method, path, status_code, message, client_ip, action, resource) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [now, keyId || 'SYSTEM', keyName || 'SYSTEM', method, path, statusCode, message, clientIp, action, resource]
     );
   } catch (err) {
     console.error('[LOGGER] Error writing audit log:', err.message);
@@ -372,7 +548,51 @@ function validateVeeamEndpoint(req, res, next) {
   next();
 }
 
-// 1. Verify Client API Key
+// IP Parsing Helpers
+function getClientIp(req) {
+  let ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || '';
+  if (ip.includes(',')) {
+    ip = ip.split(',')[0].trim();
+  }
+  if (ip.startsWith('::ffff:')) {
+    ip = ip.substring(7);
+  }
+  return ip;
+}
+
+function ipToInt(ip) {
+  try {
+    return ip.split('.').reduce((int, octet) => (int << 8) + parseInt(octet, 10), 0) >>> 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function cidrMatch(ip, cidr) {
+  try {
+    const [range, bits] = cidr.split('/');
+    const mask = ~(Math.pow(2, 32 - parseInt(bits)) - 1);
+    const ipNum = ipToInt(ip);
+    const rangeNum = ipToInt(range);
+    return (ipNum & mask) === (rangeNum & mask);
+  } catch (e) {
+    return false;
+  }
+}
+
+function ipMatches(clientIp, allowedIpsStr) {
+  if (!allowedIpsStr) return true;
+  const list = allowedIpsStr.split(',').map(item => item.trim());
+  return list.some(pattern => {
+    if (pattern === '*' || pattern === '') return true;
+    if (pattern.includes('/')) {
+      return cidrMatch(clientIp, pattern);
+    }
+    return pattern === clientIp;
+  });
+}
+
+// 1. Verify Client API Key (Checks Expiry and IP restrictions)
 async function authenticateApiKey(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -387,6 +607,7 @@ async function authenticateApiKey(req, res, next) {
     req.keyInfo = {
       id: 'env-admin-key',
       name: 'Env Admin',
+      userId: 'admin-user-id-000000000000000000000000',
       role: 'Admin'
     };
     return next();
@@ -402,10 +623,24 @@ async function authenticateApiKey(req, res, next) {
       return res.status(401).json({ error: 'Invalid or revoked API key' });
     }
 
+    // 1a. Expiration Check
+    if (keyRecord.expires_at) {
+      if (new Date(keyRecord.expires_at).getTime() < Date.now()) {
+        return res.status(401).json({ error: 'API key has expired' });
+      }
+    }
+
+    // 1b. IP Restrictions Check
+    const clientIp = getClientIp(req);
+    if (keyRecord.allowed_ips && !ipMatches(clientIp, keyRecord.allowed_ips)) {
+      return res.status(403).json({ error: `Access Denied: IP address ${clientIp} is not authorized for this API key` });
+    }
+
     req.keyInfo = {
       id: keyRecord.id,
       name: keyRecord.name,
-      role: keyRecord.role
+      userId: keyRecord.user_id,
+      role: keyRecord.role || 'Admin'
     };
     next();
   } catch (err) {
@@ -424,51 +659,78 @@ function pathMatchesPattern(reqPath, pattern) {
   return regex.test(reqPath);
 }
 
-// 2. Validate Access Control Policies (Global & RBAC)
+// 2. Validate Access Control Policies (Global & Policy-based Group Rules)
 async function authorizeRequest(req, res, next) {
   const { method, path } = req;
   // Normalize the proxied Veeam path (strip '/veeam' prefix)
   const veeamPath = path.startsWith('/veeam') ? path.substring(6) : path;
-  const role = req.keyInfo.role;
+  const userId = req.keyInfo.userId;
 
   // 2a. Check Global Rules Blocklist
   try {
-    const globalRules = await dbAll("SELECT * FROM global_rules WHERE action = 'block'");
+    const globalRules = await dbAll("SELECT * FROM global_rules");
     for (const rule of globalRules) {
       const methodMatches = rule.method === '*' || rule.method.toUpperCase() === method.toUpperCase();
       const pathMatches = pathMatchesPattern(veeamPath, rule.path_pattern);
       if (methodMatches && pathMatches) {
-        await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, `Blocked by global rule: ${rule.description}`);
-        return res.status(403).json({ error: `Blocked by global rule: ${rule.description}` });
+        // By default, global rules behave as system DENY overrides
+        await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, `Blocked by global rule: ${rule.description}`, req);
+        return res.status(403).json({ error: `Blocked by system-wide global rule: ${rule.description}` });
       }
     }
   } catch (err) {
     console.error('[AUTHZ] Error checking global rules:', err);
   }
 
-  // 2b. Check RBAC permissions based on Role
-  if (role === 'Viewer') {
-    if (method !== 'GET') {
-      await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, 'Blocked: Viewer role is restricted to read-only (GET) operations');
-      return res.status(403).json({ error: 'Viewer role is restricted to read-only (GET) operations' });
-    }
-  } else if (role === 'Operator') {
-    if (method === 'GET') {
-      // Allowed
-    } else if (method === 'POST') {
-      // Allowed only for execution/trigger sub-resources (start, stop, retry, enable, disable, backup, restore)
-      const allowedActions = ['/start', '/stop', '/retry', '/enable', '/disable', '/backup', '/restore'];
-      const isAllowedAction = allowedActions.some(action => veeamPath.endsWith(action)) || veeamPath.startsWith('/api/v1/restore/');
-      
-      if (!isAllowedAction) {
-        await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, 'Blocked: Operator is restricted from making schema edits or configuration updates');
-        return res.status(403).json({ error: 'Operator is restricted from making schema edits or configuration updates. Only job actions (start/stop/restore) are permitted.' });
+  // 2b. Check User-Group Access Rules (ALLOW / DENY hierarchy)
+  if (!userId) {
+    // If there is no user associated, default deny
+    await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, 'Blocked: Key has no associated User owner (Default Deny)', req);
+    return res.status(403).json({ error: 'Access Denied: Key has no associated user owner' });
+  }
+
+  try {
+    const userRules = await dbAll(`
+      SELECT gr.effect, gr.method, gr.path_pattern, g.name as group_name
+      FROM group_rules gr
+      JOIN user_groups ug ON gr.group_id = ug.group_id
+      JOIN groups g ON ug.group_id = g.id
+      WHERE ug.user_id = ?
+    `, [userId]);
+
+    let isAllowed = false;
+    let isDenied = false;
+    let matchingDenyRule = null;
+
+    for (const rule of userRules) {
+      const methodMatches = rule.method === '*' || rule.method.toUpperCase() === method.toUpperCase();
+      const pathMatches = pathMatchesPattern(veeamPath, rule.path_pattern);
+
+      if (methodMatches && pathMatches) {
+        if (rule.effect === 'DENY') {
+          isDenied = true;
+          matchingDenyRule = rule;
+          break; // DENY overrides all ALLOWs, exit loop immediately
+        } else if (rule.effect === 'ALLOW') {
+          isAllowed = true;
+        }
       }
-    } else {
-      // Block PUT/DELETE/etc.
-      await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, `Blocked: Operators are not authorized to perform ${method} operations`);
-      return res.status(403).json({ error: `Operators are not authorized to perform ${method} operations` });
     }
+
+    if (isDenied) {
+      const blockMsg = `Blocked: Explicit DENY rule matched in Group '${matchingDenyRule.group_name}' (${matchingDenyRule.method} ${matchingDenyRule.path_pattern})`;
+      await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, blockMsg, req);
+      return res.status(403).json({ error: `Access Denied: Request is explicitly blocked by group rule: ${matchingDenyRule.method} ${matchingDenyRule.path_pattern}` });
+    }
+
+    if (!isAllowed) {
+      await logOperation(req.keyInfo.id, req.keyInfo.name, method, veeamPath, 403, 'Blocked: Default Deny (no matching ALLOW rules)', req);
+      return res.status(403).json({ error: 'Access Denied: No matching ALLOW rule found for this request (Default Deny)' });
+    }
+
+  } catch (err) {
+    console.error('[AUTHZ] Error checking policy permissions:', err);
+    return res.status(500).json({ error: 'Authorization verification failed' });
   }
 
   next();
@@ -517,29 +779,47 @@ app.get('/api/status', authenticateApiKey, async (req, res) => {
   res.json(status);
 });
 
-// List API Keys
+// Helper to check if caller belongs to Administrators group (wildcard allow rule)
+async function checkIsAdmin(req) {
+  let isAdmin = req.keyInfo.role === 'Admin';
+  const userId = req.keyInfo.userId;
+  if (userId) {
+    const adminCheck = await dbGet(`
+      SELECT 1 FROM group_rules gr
+      JOIN user_groups ug ON gr.group_id = ug.group_id
+      WHERE ug.user_id = ? AND gr.effect = 'ALLOW' AND gr.method = '*' AND gr.path_pattern = '*'
+    `, [userId]);
+    if (adminCheck) {
+      isAdmin = true;
+    }
+  }
+  return isAdmin;
+}
+
+// List API Keys (includes owner username, allowed IPs, and expiration)
 app.get('/api/keys', authenticateApiKey, async (req, res) => {
   try {
-    const keys = await dbAll('SELECT id, name, token_masked, role, status, created_at FROM api_keys ORDER BY created_at DESC');
+    const keys = await dbAll(`
+      SELECT ak.id, ak.name, ak.token_masked, ak.role, ak.status, ak.expires_at, ak.allowed_ips, ak.created_at, u.username as owner_name 
+      FROM api_keys ak
+      LEFT JOIN users u ON ak.user_id = u.id
+      ORDER BY ak.created_at DESC
+    `);
     res.json(keys);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Create API Key (Admin only)
+// Create API Key (Admin only - associates keys with users)
 app.post('/api/keys', authenticateApiKey, async (req, res) => {
-  if (req.keyInfo.role !== 'Admin') {
+  if (!(await checkIsAdmin(req))) {
     return res.status(403).json({ error: 'Only administrators can create API keys' });
   }
 
-  const { name, role } = req.body;
-  if (!name || !role) {
-    return res.status(400).json({ error: 'Name and Role are required' });
-  }
-
-  if (!['Admin', 'Operator', 'Viewer'].includes(role)) {
-    return res.status(400).json({ error: 'Invalid role. Choose from Admin, Operator, Viewer' });
+  const { name, userId, expiresAt, allowedIps } = req.body;
+  if (!name || !userId) {
+    return res.status(400).json({ error: 'Key Name and User Owner are required' });
   }
 
   try {
@@ -550,19 +830,20 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
     const now = new Date().toISOString();
 
     await dbRun(
-      'INSERT INTO api_keys (id, name, token_hash, token_masked, role, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [keyId, name, tokenHash, tokenMasked, role, 'active', now]
+      'INSERT INTO api_keys (id, name, user_id, token_hash, token_masked, role, status, expires_at, allowed_ips, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [keyId, name, userId, tokenHash, tokenMasked, 'Admin', 'active', expiresAt || null, allowedIps || null, now]
     );
 
-    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys`, 201, `Created key: ${name} (${role})`);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys`, 201, `Created key: ${name} for user ID: ${userId}`, req);
 
-    // Return the clear token ONCE
     res.status(201).json({
       id: keyId,
       name,
-      role,
+      userId,
       token,
       masked: tokenMasked,
+      expires_at: expiresAt || null,
+      allowed_ips: allowedIps || null,
       created_at: now
     });
   } catch (err) {
@@ -572,7 +853,7 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
 
 // Revoke API Key (Admin only)
 app.post('/api/keys/:id/revoke', authenticateApiKey, async (req, res) => {
-  if (req.keyInfo.role !== 'Admin') {
+  if (!(await checkIsAdmin(req))) {
     return res.status(403).json({ error: 'Only administrators can revoke API keys' });
   }
 
@@ -589,14 +870,195 @@ app.post('/api/keys/:id/revoke', authenticateApiKey, async (req, res) => {
     }
 
     await dbRun("UPDATE api_keys SET status = 'revoked' WHERE id = ?", [id]);
-    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys/${id}/revoke`, 200, `Revoked key: ${key.name}`);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys/${id}/revoke`, 200, `Revoked key: ${key.name}`, req);
     res.json({ message: 'Key successfully revoked' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// List Global Rules
+// --- User Management APIs (Admin only) ---
+
+// List Users
+app.get('/api/users', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can view users' });
+  }
+  try {
+    const users = await dbAll(`
+      SELECT u.id, u.username, u.email, u.created_at, GROUP_CONCAT(g.name) as groups_list, GROUP_CONCAT(g.id) as group_ids_list
+      FROM users u
+      LEFT JOIN user_groups ug ON u.id = ug.user_id
+      LEFT JOIN groups g ON ug.group_id = g.id
+      GROUP BY u.id
+      ORDER BY u.username ASC
+    `);
+    
+    const formatted = users.map(user => ({
+      id: user.id,
+      username: user.username,
+      email: user.email,
+      created_at: user.created_at,
+      groups: user.groups_list ? user.groups_list.split(',') : [],
+      groupIds: user.group_ids_list ? user.group_ids_list.split(',') : []
+    }));
+    res.json(formatted);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create User
+app.post('/api/users', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can create users' });
+  }
+  const { username, email, groupIds } = req.body;
+  if (!username) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+  try {
+    const userId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    await dbRun('INSERT INTO users (id, username, email, created_at) VALUES (?, ?, ?, ?)', [
+      userId, username, email || '', now
+    ]);
+
+    if (groupIds && Array.isArray(groupIds)) {
+      for (const gid of groupIds) {
+        await dbRun('INSERT INTO user_groups (user_id, group_id) VALUES (?, ?)', [userId, gid]);
+      }
+    }
+
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/users`, 201, `Created user: ${username}`, req);
+    res.status(201).json({ id: userId, username, email, created_at: now });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update User Groups
+app.put('/api/users/:id/groups', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can modify user group assignments' });
+  }
+  const { id } = req.params;
+  const { groupIds } = req.body;
+  if (!groupIds || !Array.isArray(groupIds)) {
+    return res.status(400).json({ error: 'groupIds array is required' });
+  }
+  try {
+    await dbRun('DELETE FROM user_groups WHERE user_id = ?', [id]);
+    for (const gid of groupIds) {
+      await dbRun('INSERT INTO user_groups (user_id, group_id) VALUES (?, ?)', [id, gid]);
+    }
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'PUT', `/api/users/${id}/groups`, 200, `Updated user groups for ID: ${id}`, req);
+    res.json({ message: 'User groups updated successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete User
+app.delete('/api/users/:id', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can delete users' });
+  }
+  const { id } = req.params;
+  try {
+    const user = await dbGet('SELECT * FROM users WHERE id = ?', [id]);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (user.username === 'admin') {
+      return res.status(400).json({ error: 'Cannot delete the built-in system administrator user' });
+    }
+    await dbRun('DELETE FROM users WHERE id = ?', [id]);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'DELETE', `/api/users/${id}`, 200, `Deleted user: ${user.username}`, req);
+    res.json({ message: 'User successfully deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Group & Access Rules Management APIs (Admin only) ---
+
+// List Groups & Rules
+app.get('/api/groups', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can view groups' });
+  }
+  try {
+    const groups = await dbAll('SELECT * FROM groups ORDER BY name ASC');
+    const formatted = [];
+    for (const g of groups) {
+      const rules = await dbAll('SELECT id, effect, method, path_pattern, description FROM group_rules WHERE group_id = ?', [g.id]);
+      formatted.push({
+        ...g,
+        rules
+      });
+    }
+    res.json(formatted);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create/Update Group and sync its Rule Table
+app.post('/api/groups', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can configure groups' });
+  }
+  const { id, name, description, rules } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: 'Group Name is required' });
+  }
+  const groupId = id || crypto.randomUUID();
+  try {
+    await dbRun('INSERT OR REPLACE INTO groups (id, name, description) VALUES (?, ?, ?)', [
+      groupId, name, description || ''
+    ]);
+
+    if (rules && Array.isArray(rules)) {
+      // Clear and re-scaffold rules in group_rules
+      await dbRun('DELETE FROM group_rules WHERE group_id = ?', [groupId]);
+      for (const rule of rules) {
+        const ruleId = crypto.randomUUID();
+        await dbRun('INSERT INTO group_rules (id, group_id, effect, method, path_pattern, description) VALUES (?, ?, ?, ?, ?, ?)', [
+          ruleId, groupId, rule.effect, rule.method, rule.path_pattern, rule.description || ''
+        ]);
+      }
+    }
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/groups`, 200, `Configured group: ${name}`, req);
+    res.json({ id: groupId, name, description });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete Group
+app.delete('/api/groups/:id', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can delete groups' });
+  }
+  const { id } = req.params;
+  try {
+    const group = await dbGet('SELECT * FROM groups WHERE id = ?', [id]);
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+    if (group.name === 'Administrators') {
+      return res.status(400).json({ error: 'Cannot delete the system Administrators group' });
+    }
+    await dbRun('DELETE FROM groups WHERE id = ?', [id]);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'DELETE', `/api/groups/${id}`, 200, `Deleted group: ${group.name}`, req);
+    res.json({ message: 'Group successfully deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// List Global System Rules (Safety overrides)
 app.get('/api/rules', authenticateApiKey, async (req, res) => {
   try {
     const rules = await dbAll('SELECT * FROM global_rules');
@@ -606,33 +1068,42 @@ app.get('/api/rules', authenticateApiKey, async (req, res) => {
   }
 });
 
-// Create Global Rule (Admin only)
+// Create/Update Global System Rule (Admin only)
 app.post('/api/rules', authenticateApiKey, async (req, res) => {
-  if (req.keyInfo.role !== 'Admin') {
-    return res.status(403).json({ error: 'Only administrators can modify rules' });
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can modify system global rules' });
   }
 
-  const { method, path_pattern, action, description } = req.body;
+  const { id, method, path_pattern, action, description } = req.body;
   if (!method || !path_pattern || !action || !description) {
-    return res.status(400).json({ error: 'All rule parameters are required' });
+    return res.status(400).json({ error: 'Method, Path Pattern, Action, and Description are required' });
   }
 
   try {
-    const result = await dbRun(
-      'INSERT INTO global_rules (method, path_pattern, action, description) VALUES (?, ?, ?, ?)',
-      [method.toUpperCase(), path_pattern, action, description]
-    );
-    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/rules`, 201, `Created rule: ${action} ${method} ${path_pattern}`);
-    res.status(201).json({ id: result.lastID, method, path_pattern, action, description });
+    if (id) {
+      await dbRun(
+        'UPDATE global_rules SET method = ?, path_pattern = ?, action = ?, description = ? WHERE id = ?',
+        [method.toUpperCase(), path_pattern, action, description, id]
+      );
+      await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/rules`, 200, `Updated global rule: ${action} ${method} ${path_pattern}`, req);
+      res.json({ message: 'Global rule updated successfully' });
+    } else {
+      const result = await dbRun(
+        'INSERT INTO global_rules (method, path_pattern, action, description) VALUES (?, ?, ?, ?)',
+        [method.toUpperCase(), path_pattern, action, description]
+      );
+      await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/rules`, 201, `Created global rule: ${action} ${method} ${path_pattern}`, req);
+      res.status(201).json({ id: result.lastID, method, path_pattern, action, description });
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Delete Global Rule (Admin only)
+// Delete Global System Rule (Admin only)
 app.delete('/api/rules/:id', authenticateApiKey, async (req, res) => {
-  if (req.keyInfo.role !== 'Admin') {
-    return res.status(403).json({ error: 'Only administrators can delete rules' });
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can delete global rules' });
   }
 
   const { id } = req.params;
@@ -643,7 +1114,7 @@ app.delete('/api/rules/:id', authenticateApiKey, async (req, res) => {
     }
 
     await dbRun('DELETE FROM global_rules WHERE id = ?', [id]);
-    await logOperation(req.keyInfo.id, req.keyInfo.name, 'DELETE', `/api/rules/${id}`, 200, `Deleted rule: ${rule.action} ${rule.method} ${rule.path_pattern}`);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'DELETE', `/api/rules/${id}`, 200, `Deleted global rule: ${rule.action} ${rule.method} ${rule.path_pattern}`, req);
     res.json({ message: 'Rule successfully deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });

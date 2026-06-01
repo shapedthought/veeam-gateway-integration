@@ -9,7 +9,7 @@ description: >-
 
 # Veeam v13 Backup & Replication Custom Skill
 
-This skill allows you to securely interact with a Veeam Backup & Replication v13 environment through a secure proxy. The proxy holds the actual Veeam server credentials, provides audit logs, and filters requests according to Role-Based Access Control (RBAC) and global safety rules.
+This skill allows you to securely interact with a Veeam Backup & Replication v13 environment through a secure proxy. The proxy holds the actual Veeam server credentials, provides audit logs, and filters requests according to a dynamic Policy-Based Access Rule system (similar to Azure Security Groups) and global safety rules.
 
 ## Step 1: Smoke-Test & Greeting Endpoint
 
@@ -64,13 +64,22 @@ All forwarded Veeam endpoints are prefixed with `/veeam` on the proxy.
 
 ---
 
-## Step 4: Access Control & Veeam Permissions
+## Step 4: Policy-Based Access Rules & Permissions Hierarchy
 
-1.  **Proxy Role Enforcement**:
-    - **Viewer**: Only allowed read-only (`GET`) requests.
-    - **Operator**: Allowed `GET` requests, and `POST` requests ending in `/start`, `/stop`, `/retry`, `/enable`, `/disable`, `/backup`, `/restore` or restore tasks.
-    - **Admin**: Unrestricted proxy access (except globally blocked paths).
-    - **Global Blocks**: All `DELETE` endpoints are globally blocked.
-2.  **Veeam Server Role Enforcement**:
-    - Even if the proxy allows a request (e.g., a `GET` request under the Viewer role), the backend Veeam Backup server may return a `403 Forbidden` if the configured credentials (such as user `ed`) lack permission for that resource. 
-    - E.g., user `ed` is a restricted operator/viewer who gets a `403` on `GET /api/v1/jobs` but can successfully run `GET /api/v1/backupInfrastructure/repositories`.
+The proxy evaluates incoming request authorization using a **Policy-Based Access Rule system** mapped to Users and Groups:
+
+1.  **Authorization Evaluation Hierarchy**:
+    - **Global Override Rules**: Check first. If a request matches any System-wide Global Block Rule, it is blocked immediately (**403 Forbidden**).
+    - **Explicit Deny Rules**: Check next. If a request matches **any** group-level `DENY` rule for the caller's assigned groups, it is blocked immediately (**403 Forbidden**).
+    - **Explicit Allow Rules**: Check next. If a request matches **at least one** group-level `ALLOW` rule, it is allowed and forwarded.
+    - **Default Deny**: If a request does not match any allow rules, it is blocked by default (**403 Forbidden**).
+
+2.  **Wildcard Matching (Globs)**:
+    - Rules use wildcard patterns for paths (e.g., `/api/v1/jobs/*` matches `/api/v1/jobs/123-abc` and `GET` or `POST` or `*` for all methods).
+
+3.  **Troubleshooting `403 Forbidden` Errors**:
+    - If a request fails with `403 Forbidden` from the gateway, read the JSON error body:
+      - **"Blocked by system-wide global rule..."**: System policy forbids this action. Do not retry.
+      - **"Access Denied: Request is explicitly blocked by group rule..."**: Your user's group policies explicitly deny this action.
+      - **"Access Denied: No matching ALLOW rule found..."**: Default Deny. The proxy does not have an active policy permitting this endpoint. Report the exact request details (Method + Path) to the system administrator to request an appropriate ALLOW rule.
+    - **Veeam Server Error fallback**: Even if the proxy allows a request, the Veeam server itself might return a 403 or 401 if the configured target credentials lack authorization in the Veeam console.
