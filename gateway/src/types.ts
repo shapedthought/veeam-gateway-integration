@@ -63,6 +63,8 @@ export interface StatusInfo {
   veeamUrl: string;
   connectionStatus: 'Connected' | 'Disconnected' | 'Error';
   error: string | null;
+  role?: string;
+  isAdmin?: boolean;
 }
 
 export type TabId = 'dashboard' | 'keys' | 'users' | 'security' | 'logs' | 'config';
@@ -82,9 +84,10 @@ export interface Ctx {
   logs: AuditLog[];
   config: ConfigInfo;
   status: StatusInfo | null;
+  isAdmin: boolean;
   toast: (msg: string) => void;
   go: (tab: TabId) => void;
-  createKey: (data: { name: string; userId: string; ips: string; exp: string }) => void;
+  createKey: (data: { name: string; userId: string; ips: string; exp: string; role: 'Admin' | 'Viewer' }) => void;
   revokeKey: (id: string) => void;
   createUser: (data: { name: string; email: string; gids: string[] }) => void;
   deleteUser: (id: string) => void;

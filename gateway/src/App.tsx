@@ -122,9 +122,9 @@ export default function App() {
   };
 
   const ctx: Ctx = {
-    keys, users, groups, rules, logs, config, status, toast, go: setTab,
-    createKey: async ({ name, userId, ips, exp }) => {
-      const res = await post('keys', { name, userId, expiresAt: exp || null, allowedIps: ips || null });
+    keys, users, groups, rules, logs, config, status, isAdmin: !!status?.isAdmin, toast, go: setTab,
+    createKey: async ({ name, userId, ips, exp, role }) => {
+      const res = await post('keys', { name, userId, role, expiresAt: exp || null, allowedIps: ips || null });
       if (res) { const data = await res.json(); setModal({ type: 'reveal', name: data.name, token: data.token }); fetchData(); }
     },
     revokeKey: async (id) => {
@@ -240,6 +240,7 @@ export default function App() {
   };
 
   const connected = (status?.connectionStatus || 'Disconnected') === 'Connected';
+  const isAdmin = !!status?.isAdmin;
 
   return (
     <div className={`console ${theme}`} style={{ height: '100%' }}>
@@ -264,8 +265,8 @@ export default function App() {
           <div className="sidebar-foot">
             <div className="conn-mini"><span className={`dot ${connected ? 'ok' : 'danger'}`}></span><div className="conn-mini-text"><b>{connected ? 'Connected' : 'Disconnected'}</b><span>{(status?.veeamUrl || '').replace('https://', '') || '—'}</span></div></div>
             <div className="user-row">
-              <div className="avatar">AD</div>
-              <div className="user-meta"><b>admin</b><span>Administrator</span></div>
+              <div className="avatar">{isAdmin ? 'AD' : 'VW'}</div>
+              <div className="user-meta"><b>{isAdmin ? 'admin' : 'viewer'}</b><span>{isAdmin ? 'Administrator' : 'Read-only access'}</span></div>
               <button className="icon-btn logout" title="Disconnect" onClick={handleLogout}><Icon name="power" size={17} /></button>
             </div>
           </div>
@@ -276,6 +277,7 @@ export default function App() {
             <button className="icon-btn" title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} onClick={() => setCollapsed((c) => !c)} style={{ marginLeft: '-6px' }}><Icon name="panel" size={19} /></button>
             <div className="page-title"><h1>{title}</h1><p>{subtitle}</p></div>
             <div className="topbar-spacer"></div>
+            {!isAdmin ? <span className="ro-badge" title="This key has read-only (Viewer) access"><Icon name="shield" size={13} />Read-only</span> : null}
             <button className="icon-btn" title="Refresh" onClick={() => { fetchData(); toast('Refreshed'); }}><Icon name="refresh" size={18} /></button>
             <div className="theme-toggle">
               <button className={theme === 'light' ? 'on' : ''} onClick={() => setTheme('light')} title="Light"><Icon name="sun" size={16} /></button>
