@@ -240,6 +240,10 @@ body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: #f4f6f4;
    Pin children to their natural height so the page scrolls to reach every row. */
 .content > * { flex-shrink: 0; }
 
+/* read-only (Viewer) badge in the topbar */
+.ro-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 999px; background: rgba(245, 158, 11, 0.14); color: #b45309; border: 1px solid rgba(245, 158, 11, 0.3); white-space: nowrap; }
+.console.dark .ro-badge { color: #fbbf24; }
+
 .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 .compact .kpi-row { gap: 12px; }
 

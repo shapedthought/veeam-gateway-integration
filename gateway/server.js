@@ -300,6 +300,18 @@ async function initDb() {
     await dbRun('UPDATE api_keys SET user_id = ? WHERE user_id IS NULL OR user_id = ?', [adminUser.id, '']);
   }
 
+  // Ensure a read-only "Dashboard Viewers" group exists (idempotent across upgrades).
+  // It has NO rules, so its members are default-denied on every /veeam call — bind a
+  // Viewer key's user here for "read the console, touch nothing" end to end.
+  const viewerGroup = await dbGet("SELECT id FROM groups WHERE name = 'Dashboard Viewers'");
+  if (!viewerGroup) {
+    await dbRun('INSERT INTO groups (id, name, description) VALUES (?, ?, ?)', [
+      crypto.randomUUID(), 'Dashboard Viewers',
+      'Read-only console access with no Veeam API permissions (default-deny on all /veeam calls).'
+    ]);
+    console.log('[DB] Ensured Dashboard Viewers group (no Veeam access)');
+  }
+
   // Seed default global rule to block DELETE if empty
   const ruleCount = await dbGet('SELECT count(*) as count FROM global_rules');
   if (ruleCount.count === 0) {
@@ -776,24 +788,23 @@ app.get('/api/status', authenticateApiKey, async (req, res) => {
     }
   }
 
+  // Expose the caller's control-plane role so the UI can render read-only for Viewers.
+  status.role = req.keyInfo.role;
+  status.isAdmin = req.keyInfo.role === 'Admin';
+
+  // Audit dashboard access by non-admin (Viewer) keys so their usage is traceable.
+  if (!status.isAdmin) {
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'GET', '/api/status', 200, 'Viewer console access', req);
+  }
+
   res.json(status);
 });
 
-// Helper to check if caller belongs to Administrators group (wildcard allow rule)
+// Control-plane admin is determined authoritatively by the key's role. A Viewer
+// key is never a management-API admin, even if its user belongs to a wildcard-ALLOW
+// group — that group only governs /veeam proxy access, not the management API.
 async function checkIsAdmin(req) {
-  let isAdmin = req.keyInfo.role === 'Admin';
-  const userId = req.keyInfo.userId;
-  if (userId) {
-    const adminCheck = await dbGet(`
-      SELECT 1 FROM group_rules gr
-      JOIN user_groups ug ON gr.group_id = ug.group_id
-      WHERE ug.user_id = ? AND gr.effect = 'ALLOW' AND gr.method = '*' AND gr.path_pattern = '*'
-    `, [userId]);
-    if (adminCheck) {
-      isAdmin = true;
-    }
-  }
-  return isAdmin;
+  return req.keyInfo.role === 'Admin';
 }
 
 // List API Keys (includes owner username, allowed IPs, and expiration)
@@ -817,10 +828,12 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
     return res.status(403).json({ error: 'Only administrators can create API keys' });
   }
 
-  const { name, userId, expiresAt, allowedIps } = req.body;
+  const { name, userId, expiresAt, allowedIps, role } = req.body;
   if (!name || !userId) {
     return res.status(400).json({ error: 'Key Name and User Owner are required' });
   }
+  // Default to least-privilege Viewer; only an explicit 'Admin' grants control-plane admin.
+  const keyRole = role === 'Admin' ? 'Admin' : 'Viewer';
 
   try {
     const token = 'veeam_vproxy_' + crypto.randomBytes(24).toString('hex');
@@ -831,16 +844,17 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
 
     await dbRun(
       'INSERT INTO api_keys (id, name, user_id, token_hash, token_masked, role, status, expires_at, allowed_ips, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [keyId, name, userId, tokenHash, tokenMasked, 'Admin', 'active', expiresAt || null, allowedIps || null, now]
+      [keyId, name, userId, tokenHash, tokenMasked, keyRole, 'active', expiresAt || null, allowedIps || null, now]
     );
 
-    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys`, 201, `Created key: ${name} for user ID: ${userId}`, req);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys`, 201, `Created ${keyRole} key: ${name} for user ID: ${userId}`, req);
 
     res.status(201).json({
       id: keyId,
       name,
       userId,
       token,
+      role: keyRole,
       masked: tokenMasked,
       expires_at: expiresAt || null,
       allowed_ips: allowedIps || null,
@@ -881,9 +895,7 @@ app.post('/api/keys/:id/revoke', authenticateApiKey, async (req, res) => {
 
 // List Users
 app.get('/api/users', authenticateApiKey, async (req, res) => {
-  if (!(await checkIsAdmin(req))) {
-    return res.status(403).json({ error: 'Only administrators can view users' });
-  }
+  // Read-only: any authenticated key (incl. Viewer) may list users for the console.
   try {
     const users = await dbAll(`
       SELECT u.id, u.username, u.email, u.created_at, GROUP_CONCAT(g.name) as groups_list, GROUP_CONCAT(g.id) as group_ids_list
@@ -985,9 +997,7 @@ app.delete('/api/users/:id', authenticateApiKey, async (req, res) => {
 
 // List Groups & Rules
 app.get('/api/groups', authenticateApiKey, async (req, res) => {
-  if (!(await checkIsAdmin(req))) {
-    return res.status(403).json({ error: 'Only administrators can view groups' });
-  }
+  // Read-only: any authenticated key (incl. Viewer) may list groups/rules for the console.
   try {
     const groups = await dbAll('SELECT * FROM groups ORDER BY name ASC');
     const formatted = [];
@@ -1133,9 +1143,8 @@ app.get('/api/logs', authenticateApiKey, async (req, res) => {
 
 // Get Veeam Connection Settings (Admin only)
 app.get('/api/config', authenticateApiKey, async (req, res) => {
-  if (req.keyInfo.role !== 'Admin') {
-    return res.status(403).json({ error: 'Only administrators can read connection settings' });
-  }
+  // Read-only: any authenticated key (incl. Viewer) may read connection settings.
+  // The password is never returned — only whether one is set.
   res.json({
     url: veeamConfig.url,
     username: veeamConfig.username,

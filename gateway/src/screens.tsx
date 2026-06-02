@@ -115,27 +115,29 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
   }, [ctx.users]); // eslint-disable-line react-hooks/exhaustive-deps
   const [ips, setIps] = useState('');
   const [exp, setExp] = useState('');
-  const submit = (e: FormEvent) => { e.preventDefault(); if (!name.trim()) return; ctx.createKey({ name, userId, ips, exp }); setName(''); setIps(''); setExp(''); setOpen(false); };
+  const [role, setRole] = useState<'Admin' | 'Viewer'>('Viewer');
+  const submit = (e: FormEvent) => { e.preventDefault(); if (!name.trim()) return; ctx.createKey({ name, userId, ips, exp, role }); setName(''); setIps(''); setExp(''); setRole('Viewer'); setOpen(false); };
   const noUsers = ctx.users.length === 0;
   return (
     <>
       <div className="card">
-        <div className="panel-head"><h2>API Credentials <span className="sub" style={{ marginLeft: 8 }}>{ctx.keys.length} total</span></h2><button className="btn primary sm" disabled={noUsers} onClick={() => setOpen(true)}><Icon name="key" size={15} />Issue Token</button></div>
+        <div className="panel-head"><h2>API Credentials <span className="sub" style={{ marginLeft: 8 }}>{ctx.keys.length} total</span></h2>{ctx.isAdmin ? <button className="btn primary sm" disabled={noUsers} onClick={() => setOpen(true)}><Icon name="key" size={15} />Issue Token</button> : null}</div>
         <div className="tbl-wrap"><table className="tbl">
-          <thead><tr><th>Name</th><th>Owner</th><th>Allowed IPs</th><th>Expires</th><th>Token</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Owner</th><th>Role</th><th>Allowed IPs</th><th>Expires</th><th>Token</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {ctx.keys.map((k) => (
               <tr key={k.id}>
                 <td style={{ fontWeight: 600 }}>{k.name}</td>
                 <td><span className="tag owner"><Icon name="users" size={12} />{k.owner_name || 'Unassigned'}</span></td>
+                <td><span className={`tag ${k.role === 'Viewer' ? 'muted' : 'group'}`}>{k.role || 'Admin'}</span></td>
                 <td className="mono-cell">{k.allowed_ips || 'Any IP'}</td>
                 <td className="mono-cell">{k.expires_at ? <span style={{ color: new Date(k.expires_at) < new Date() ? 'var(--danger)' : 'inherit' }}>{fmtDate(k.expires_at)}</span> : 'Never'}</td>
                 <td className="mono-cell">{k.token_masked}</td>
                 <td><span className={`status-live ${k.status}`}><span className="dot" style={{ background: k.status === 'active' ? 'var(--ok)' : 'var(--text-subtle)' }}></span>{k.status === 'active' ? 'Active' : 'Revoked'}</span></td>
-                <td>{k.status === 'active' ? <button className="btn danger xs" onClick={() => ctx.revokeKey(k.id)}>Revoke</button> : <span className="hint">—</span>}</td>
+                <td>{ctx.isAdmin && k.status === 'active' ? <button className="btn danger xs" onClick={() => ctx.revokeKey(k.id)}>Revoke</button> : <span className="hint">—</span>}</td>
               </tr>
             ))}
-            {ctx.keys.length === 0 ? <tr><td colSpan={7} className="empty">No API keys issued yet.</td></tr> : null}
+            {ctx.keys.length === 0 ? <tr><td colSpan={8} className="empty">No API keys issued yet.</td></tr> : null}
           </tbody>
         </table></div>
       </div>
@@ -151,6 +153,10 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
                 <div className="field"><label className="fl">Key Name / Client ID</label><input className="inp" placeholder="e.g. LLM-Client-Production" value={name} onChange={(e) => setName(e.target.value)} required autoFocus /></div>
                 <div className="field"><label className="fl">Associated User</label>
                   <select className="sel" value={userId} onChange={(e) => setUserId(e.target.value)}>{ctx.users.map((u) => <option key={u.id} value={u.id}>{u.username}{u.email ? ` (${u.email})` : ''}</option>)}</select>
+                </div>
+                <div className="field"><label className="fl">Console Role</label>
+                  <select className="sel" value={role} onChange={(e) => setRole(e.target.value as 'Admin' | 'Viewer')}><option value="Viewer">Viewer — read-only dashboard</option><option value="Admin">Admin — full control</option></select>
+                  <span className="hint">Viewer keys can sign in and view, but cannot change any gateway settings.</span>
                 </div>
                 <div className="field"><label className="fl">Allowed IPs / Subnets</label><input className="inp" placeholder="e.g. 10.0.0.0/24" value={ips} onChange={(e) => setIps(e.target.value)} /><span className="hint">Comma separated. Leave empty to allow any client IP.</span></div>
                 <div className="field" style={{ marginBottom: 0 }}><label className="fl">Expiration Date</label><input className="inp" type="date" value={exp} onChange={(e) => setExp(e.target.value)} /><span className="hint">Leave empty for non-expiring credentials.</span></div>
@@ -175,7 +181,7 @@ export function UsersScreen({ ctx }: { ctx: Ctx }) {
   return (
     <>
       <div className="card">
-        <div className="panel-head"><h2>Proxy User Directory <span className="sub" style={{ marginLeft: 8 }}>{ctx.users.length} users</span></h2><button className="btn primary sm" onClick={() => setOpen(true)}><Icon name="users" size={15} />Register User</button></div>
+        <div className="panel-head"><h2>Proxy User Directory <span className="sub" style={{ marginLeft: 8 }}>{ctx.users.length} users</span></h2>{ctx.isAdmin ? <button className="btn primary sm" onClick={() => setOpen(true)}><Icon name="users" size={15} />Register User</button> : null}</div>
         <div className="tbl-wrap"><table className="tbl">
           <thead><tr><th>Username</th><th>Email</th><th>Security Groups</th><th>Registered</th><th></th></tr></thead>
           <tbody>
@@ -185,10 +191,10 @@ export function UsersScreen({ ctx }: { ctx: Ctx }) {
                 <td className="mono-cell">{u.email || '—'}</td>
                 <td><div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>{u.groups.length ? u.groups.map((g, i) => <span key={i} className="tag group">{g}</span>) : <span className="tag muted">No groups · default deny</span>}</div></td>
                 <td className="t-time">{fmtDate(u.created_at)}</td>
-                <td><div className="row-actions">
+                <td>{ctx.isAdmin ? <div className="row-actions">
                   <button className="btn ghost xs" onClick={() => ctx.openUserGroups(u)}>Groups</button>
                   {u.username !== 'admin' ? <button className="btn danger xs" onClick={() => ctx.deleteUser(u.id)}>Delete</button> : null}
-                </div></td>
+                </div> : <span className="hint">—</span>}</td>
               </tr>
             ))}
             {ctx.users.length === 0 ? <tr><td colSpan={5} className="empty">No users registered yet.</td></tr> : null}
@@ -251,7 +257,7 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
           <button className={`sec-tab ${section === 'groups' ? 'active' : ''}`} onClick={() => setSection('groups')}><Icon name="shield" size={16} />Group Policies</button>
           <button className={`sec-tab ${section === 'global' ? 'active' : ''}`} onClick={() => setSection('global')}><Icon name="logs" size={16} />Global Overrides</button>
         </div>
-        {section === 'groups' ? <button className="btn ghost" onClick={() => ctx.openCreateGroup()}>+ Create Group</button> : null}
+        {section === 'groups' && ctx.isAdmin ? <button className="btn ghost" onClick={() => ctx.openCreateGroup()}>+ Create Group</button> : null}
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -266,7 +272,7 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                   </div>
                   <p className="lead" style={{ marginTop: 12 }}>{group.description}</p>
                 </div>
-                {group.name !== 'Administrators' ? <button className="btn danger sm" onClick={() => ctx.deleteGroup(group.id)}>Delete Group</button> : null}
+                {ctx.isAdmin && group.name !== 'Administrators' ? <button className="btn danger sm" onClick={() => ctx.deleteGroup(group.id)}>Delete Group</button> : null}
               </div>
 
               <div className="tbl-wrap"><table className="tbl" style={{ marginBottom: 22 }}>
@@ -278,14 +284,14 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                       <td><span className={`method ${methodClass(r.method)}`}>{r.method}</span></td>
                       <td className="path">{r.path_pattern}</td>
                       <td>{r.description}</td>
-                      <td><button className="btn danger xs" onClick={() => ctx.deleteGroupRule(group.id, i)}>Remove</button></td>
+                      <td>{ctx.isAdmin ? <button className="btn danger xs" onClick={() => ctx.deleteGroupRule(group.id, i)}>Remove</button> : <span className="hint">—</span>}</td>
                     </tr>
                   ))}
                   {(group.rules || []).length === 0 ? <tr><td colSpan={5} className="empty">No rules — default deny applies.</td></tr> : null}
                 </tbody>
               </table></div>
 
-              <form className="subform" onSubmit={addRule}>
+              {ctx.isAdmin ? (<form className="subform" onSubmit={addRule}>
                 <h4>Add Policy Rule</h4>
                 <div className="rule-grid">
                   <div className="field" style={{ marginBottom: 0 }}><label className="fl">Effect</label><select className="sel" value={eff} onChange={(e) => setEff(e.target.value as 'ALLOW' | 'DENY')}><option>ALLOW</option><option>DENY</option></select></div>
@@ -294,14 +300,14 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                 </div>
                 <div className="field" style={{ margin: '14px 0' }}><label className="fl">Description</label><input className="inp" placeholder="e.g. Allows querying job parameters" value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
                 <button className="btn primary sm" type="submit">Add Rule</button>
-              </form>
+              </form>) : null}
             </div>
           </div>
         ) : null}
 
         {section === 'global' ? (
           <div className="card">
-            <div className="panel-head"><h2>System Global Rules</h2><button className="btn primary sm" onClick={() => setGOpen(true)}><Icon name="shield" size={15} />Add Global Rule</button></div>
+            <div className="panel-head"><h2>System Global Rules</h2>{ctx.isAdmin ? <button className="btn primary sm" onClick={() => setGOpen(true)}><Icon name="shield" size={15} />Add Global Rule</button> : null}</div>
             <div className="panel-body" style={{ paddingBottom: 8 }}>
               <div className="callout danger" style={{ marginBottom: 4 }}><Icon name="shield" size={16} /><span><b>Override blocks.</b> A request matching any rule below is dropped immediately, overriding group-level allow rules.</span></div>
             </div>
@@ -314,7 +320,7 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                     <td className="path">{r.path_pattern}</td>
                     <td><span className="tag deny">{r.action.toUpperCase()}</span></td>
                     <td>{r.description}</td>
-                    <td><button className="btn danger xs" onClick={() => ctx.deleteGlobalRule(r.id)}>Remove</button></td>
+                    <td>{ctx.isAdmin ? <button className="btn danger xs" onClick={() => ctx.deleteGlobalRule(r.id)}>Remove</button> : <span className="hint">—</span>}</td>
                   </tr>
                 ))}
                 {ctx.rules.length === 0 ? <tr><td colSpan={5} className="empty">No global rules configured.</td></tr> : null}
@@ -407,10 +413,12 @@ export function ConfigScreen({ ctx }: { ctx: Ctx }) {
         <div className="panel-body">
           <p className="muted-p">Credentials the proxy uses to authenticate with your Veeam Backup &amp; Replication server. Stored encrypted with AES-256-GCM.</p>
           <form onSubmit={submit}>
-            <div className="field"><label className="fl">Veeam REST API URL</label><input className="inp" type="url" placeholder="https://192.168.0.238:9419" value={url} onChange={(e) => setUrl(e.target.value)} required /><span className="hint">Include protocol and port (typically 9419)</span></div>
-            <div className="field"><label className="fl">Veeam Username</label><input className="inp" value={user} onChange={(e) => setUser(e.target.value)} required /></div>
-            <div className="field"><label className="fl">Veeam Password</label><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required /><span className="hint">Enter a new password to overwrite, or leave as ******</span></div>
-            <button className="btn primary" type="submit" disabled={saving} style={{ width: '100%' }}><Icon name="link" size={15} />{saving ? 'Saving…' : 'Save & Test Connection'}</button>
+            <div className="field"><label className="fl">Veeam REST API URL</label><input className="inp" type="url" placeholder="https://192.168.0.238:9419" value={url} onChange={(e) => setUrl(e.target.value)} required disabled={!ctx.isAdmin} /><span className="hint">Include protocol and port (typically 9419)</span></div>
+            <div className="field"><label className="fl">Veeam Username</label><input className="inp" value={user} onChange={(e) => setUser(e.target.value)} required disabled={!ctx.isAdmin} /></div>
+            <div className="field"><label className="fl">Veeam Password</label><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required disabled={!ctx.isAdmin} /><span className="hint">Enter a new password to overwrite, or leave as ******</span></div>
+            {ctx.isAdmin
+              ? <button className="btn primary" type="submit" disabled={saving} style={{ width: '100%' }}><Icon name="link" size={15} />{saving ? 'Saving…' : 'Save & Test Connection'}</button>
+              : <div className="callout warn"><Icon name="shield" size={16} /><span>Read-only access — connection settings can only be changed by an administrator.</span></div>}
           </form>
         </div>
       </div>
