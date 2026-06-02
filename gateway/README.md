@@ -156,14 +156,17 @@ Connection settings can be initialized via environment variables (`.env`) or mod
 * **Securing the DB Volume**: While the credentials are encrypted at rest, they are readable by the Node process inside the container. Ensure the volume host directory (or Docker/Podman volume) is protected with strict filesystem permissions (e.g., `chmod 700` and restricted ownership to the container runtime user).
 
 ### 3. Middleware Security Layers
-Every request routed through the `/veeam/*` proxy endpoint undergoes three successive validation checks:
-1.  **Authentication Middleware**: Hashes the incoming API key token using SHA-256 and compares it against active records in SQLite.
-2.  **API Schema Validator**: Matches the target request path against the compiled Veeam v13 OpenAPI paths. Non-existent routes are immediately dropped with a `404 Not Found` (filtering out path injections).
-3.  **RBAC Authorization**: Compares the HTTP verb and path against the key's assigned role rules:
-    *   **Viewer**: Only allowed read-only (`GET`) requests.
-    *   **Operator**: Allowed `GET` requests, and `POST` requests targeting job starts/stops or restore actions. Cannot create or edit jobs.
-    *   **Admin**: Unrestricted proxy routing.
-4.  **Global Safety Rules (Blocklist)**: Evaluates a table of admin-configured wildcard rules (e.g. `DELETE *`) to drop high-risk requests before forwarding.
+Every request routed through the `/veeam/*` proxy endpoint passes through three middleware stages, in order:
+
+1.  **Authentication**: The incoming API key is hashed with SHA-256 and matched against active keys in SQLite. Per-key expiry and IP/CIDR allowlists are enforced here — an expired key is rejected with `401`, a request from a disallowed source IP with `403`.
+2.  **Schema Validation**: The target path and method are matched against the compiled Veeam v13 OpenAPI definitions. An unknown path is dropped with `404 Not Found`, and a known path called with a disallowed method with `405 Method Not Allowed` — filtering out path injection before anything reaches Veeam.
+3.  **Authorization (Policy-Based Access Rules)**: The request's method and path are evaluated against an Azure-style allow/deny policy, first match wins, in this precedence:
+    1.  **Global blocklist** — system-wide block rules (e.g. `DELETE *`) are checked first and override everything, including admins → `403`.
+    2.  **Explicit DENY** — any `DENY` rule from the caller's groups blocks the request → `403`. A DENY always beats an ALLOW.
+    3.  **Explicit ALLOW** — at least one matching `ALLOW` rule from the caller's groups permits the request, and it is forwarded to Veeam.
+    4.  **Default deny** — no matching ALLOW rule → `403`.
+
+    Rules match on HTTP method (or `*`) and glob path patterns (e.g. `/api/v1/jobs/*`). A key's Veeam permissions are the **union of its owner's group rules** — there are no fixed per-key proxy roles. (The separate **Admin/Viewer** role on a key governs the management dashboard under `/api/*`, *not* this `/veeam` policy — see *How to Use the Dashboard* above.)
 
 ---
 
