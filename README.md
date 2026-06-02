@@ -2,6 +2,10 @@
 
 This repository contains a complete solution to securely integrate an AI Assistant (like Gemini) with a Veeam Backup & Replication v13 environment.
 
+![Veeam Gateway Enterprise Console — dashboard](./images/Dashboard.png)
+
+*The Enterprise Console dashboard — gateway health, security groups, blocked requests, and recent activity at a glance.*
+
 ## Repository Structure
 
 - **`gateway/`**: The secure proxy gateway deployed on the Atelier platform (or runnable locally with Docker/Podman). It manages credentials, token caching, global blocklist rules, Role-Based Access Control (RBAC), and logs audit events to an SQLite database. 
