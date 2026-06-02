@@ -18,3 +18,7 @@ This repository contains a complete solution to securely integrate an AI Assista
 ## Setup Instructions
 
 See the README files in the respective directories for detailed configuration and deployment guides.
+
+## License
+
+Released under the [MIT License](LICENSE).
