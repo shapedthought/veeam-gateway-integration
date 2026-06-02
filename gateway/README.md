@@ -164,3 +164,28 @@ Every request routed through the `/veeam/*` proxy endpoint undergoes three succe
     *   **Operator**: Allowed `GET` requests, and `POST` requests targeting job starts/stops or restore actions. Cannot create or edit jobs.
     *   **Admin**: Unrestricted proxy routing.
 4.  **Global Safety Rules (Blocklist)**: Evaluates a table of admin-configured wildcard rules (e.g. `DELETE *`) to drop high-risk requests before forwarding.
+
+---
+
+## Deploying to Atelier
+
+This gateway runs on the Atelier platform as a `direct`-build app: the Atelier app's git repo holds **this `gateway/` folder's contents at its root**, and pushing to that repo's `main` branch triggers a build from the `Dockerfile`.
+
+[`push_to_atelier.sh`](push_to_atelier.sh) automates that push. It clones the Atelier app repo, mirrors this source into it (preserving Atelier's own build outputs like `atelier-spec.yaml` and `k8s/`), and pushes a commit to `main` — **without touching the surrounding monorepo's git history**.
+
+```bash
+# from gateway/
+DRY_RUN=1 ./push_to_atelier.sh   # preview what would deploy (pushes nothing)
+./push_to_atelier.sh             # deploy → triggers the build
+```
+
+Configuration is read from `gateway/.env` (or the environment):
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `ATELIER_API_TOKEN` | yes | Developer-role token (`atl_…`) used for git authentication |
+| `ATELIER_API_URL` | no | REST base, used only to print the build-watch hint |
+| `ATELIER_GIT_HOST` | no | git proxy host (default `atelier.home.arpa`) |
+| `ATELIER_APP_NAME` | no | app / repo name (default `veeam-gateway`) |
+
+The token is fed to git out-of-band via a temporary askpass helper created **outside** the repo, so it is never written into the working tree or a commit.
