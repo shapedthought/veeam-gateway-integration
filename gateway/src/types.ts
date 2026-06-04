@@ -116,8 +116,8 @@ export interface Ctx {
   addGlobalRule: (rule: { method: string; path_pattern: string; description: string }) => void;
   deleteGlobalRule: (id: number) => void;
   saveConfig: (data: { url: string; username: string; password: string; apiVersion: string }) => Promise<void>;
-  createServer: (data: ServerInput) => Promise<void>;
-  updateServer: (id: string, data: ServerInput) => Promise<void>;
+  createServer: (data: ServerInput) => Promise<boolean>;
+  updateServer: (id: string, data: ServerInput) => Promise<boolean>;
   deleteServer: (id: string) => void;
   testServer: (id: string) => Promise<ServerStatus>;
 }

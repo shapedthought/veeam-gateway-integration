@@ -69,7 +69,7 @@ The gateway can front **multiple** Veeam Backup & Replication servers, and every
 * **Default server** — a path beginning `/veeam/api/…` goes to your key's **default** server (or the system default if the key has none). This is the common case; you don't name the server.
 * **Explicit server** — to target a specific one, insert its **slug** right after `/veeam`:
   `GET <proxy_base_url>/veeam/<slug>/api/v1/jobs`. (Real Veeam paths always start with `/api`, so any other first segment is read as a server slug.)
-* **Discover servers** — `GET <proxy_base_url>/api/servers` lists configured servers (`slug`, `name`, `url` — never credentials). Use it to learn which slugs you can address.
+* **Discover servers** — `GET <proxy_base_url>/api/servers` lists configured servers, each with `slug`, `name`, `url`, `username`, `apiVersion`, `isDefault`, and `hasPassword` — **the password itself is never returned**. Use it to learn which slugs you can address.
 * **Unknown slug** → `404` (`Veeam server '<slug>' is not configured`).
 
 Authorization is enforced **per server**, so a `403` can mean your key is permitted on one VBR but not another (see Step 4).

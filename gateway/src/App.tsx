@@ -196,14 +196,15 @@ export default function App() {
     },
     createServer: async (data) => {
       const res = await post('servers', data, 'Server added');
-      if (res) fetchData();
+      if (res) { fetchData(); return true; }
+      return false;
     },
     updateServer: async (id, data) => {
       try {
         const res = await fetch(getApiUrl(`servers/${id}`), { method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(data) });
-        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'Failed to update server'); return; }
-        toast('Server updated'); fetchData();
-      } catch (err) { alert(errMsg(err)); }
+        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'Failed to update server'); return false; }
+        toast('Server updated'); fetchData(); return true;
+      } catch (err) { alert(errMsg(err)); return false; }
     },
     deleteServer: async (id) => {
       if (!confirm('Delete this Veeam server? Keys defaulting to it fall back to the system default, and rules scoped to it stop matching.')) return;

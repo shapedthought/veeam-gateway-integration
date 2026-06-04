@@ -426,8 +426,8 @@ export function ServersScreen({ ctx }: { ctx: Ctx }) {
     setSaving(true);
     const data = { slug, name, url, username: user, password: pw, apiVersion: ver, isDefault: isDef };
     try {
-      if (editing) await ctx.updateServer(editing.id, data); else await ctx.createServer(data);
-      setOpen(false);
+      const ok = editing ? await ctx.updateServer(editing.id, data) : await ctx.createServer(data);
+      if (ok) setOpen(false); // keep the form open (state intact) if the save failed
     } finally { setSaving(false); }
   };
   const test = async (id: string) => {
@@ -476,7 +476,7 @@ export function ServersScreen({ ctx }: { ctx: Ctx }) {
       {open ? (
         <div className="overlay" onClick={() => setOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-head"><h2>{editing ? 'Edit' : 'Add'} Veeam Server</h2><p>Credentials are stored encrypted (AES-256-GCM) and never returned by the API.</p></div>
+            <div className="modal-head"><h2>{editing ? 'Edit' : 'Add'} Veeam Server</h2><p>The password is stored encrypted (AES-256-GCM) and is never returned by the API.</p></div>
             <form onSubmit={submit}>
               <div className="modal-body">
                 <div className="field"><label className="fl">Display Name</label><input className="inp" placeholder="e.g. Production VBR" value={name} onChange={(e) => setName(e.target.value)} /></div>
@@ -485,7 +485,7 @@ export function ServersScreen({ ctx }: { ctx: Ctx }) {
                 <div className="field"><label className="fl">Username</label><input className="inp" value={user} onChange={(e) => setUser(e.target.value)} required /></div>
                 <div className="field"><label className="fl">Password</label><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required={!editing} /><span className="hint">{editing ? 'Leave as ****** to keep the current password.' : ''}</span></div>
                 <div className="field"><label className="fl">API Version</label><input className="inp" placeholder="1.3-rev1" value={ver} onChange={(e) => setVer(e.target.value)} /><span className="hint">Sent as the <code>x-api-version</code> header. Update when this server's REST API version changes.</span></div>
-                <label className="check-row" style={{ marginBottom: 0 }}><input type="checkbox" checked={isDef} onChange={(e) => setIsDef(e.target.checked)} /><span className="cr-text"><b>Default server</b><span>Used when a key/request doesn't name a specific server.</span></span></label>
+                <label className="check-row" style={{ marginBottom: 0 }}><input type="checkbox" checked={isDef} disabled={!!editing && editing.isDefault} onChange={(e) => setIsDef(e.target.checked)} /><span className="cr-text"><b>Default server</b><span>{editing && editing.isDefault ? 'This is the default. To move it, set another server as default.' : "Used when a key or request doesn't name a specific server."}</span></span></label>
               </div>
               <div className="modal-foot"><button type="button" className="btn ghost" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn primary" disabled={saving}><Icon name="server" size={15} />{saving ? 'Saving…' : (editing ? 'Save Changes' : 'Add Server')}</button></div>
             </form>
