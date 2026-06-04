@@ -10,6 +10,7 @@ export interface ApiKey {
   allowed_ips: string | null;
   created_at?: string;
   owner_name: string | null;
+  default_server?: string | null; // slug of the key's default VBR (null = system default)
 }
 
 export interface GlobalRule {
@@ -69,6 +70,7 @@ export interface AuditLog {
   client_ip: string | null;
   action: string | null;
   resource: string | null;
+  server?: string | null; // which Veeam server the request hit
 }
 
 export interface StatusInfo {
@@ -102,7 +104,7 @@ export interface Ctx {
   isAdmin: boolean;
   toast: (msg: string) => void;
   go: (tab: TabId) => void;
-  createKey: (data: { name: string; userId: string; ips: string; exp: string; role: 'Admin' | 'Viewer' }) => void;
+  createKey: (data: { name: string; userId: string; ips: string; exp: string; role: 'Admin' | 'Viewer'; defaultServerId: string }) => void;
   revokeKey: (id: string) => void;
   createUser: (data: { name: string; email: string; gids: string[] }) => void;
   deleteUser: (id: string) => void;
@@ -114,4 +116,23 @@ export interface Ctx {
   addGlobalRule: (rule: { method: string; path_pattern: string; description: string }) => void;
   deleteGlobalRule: (id: number) => void;
   saveConfig: (data: { url: string; username: string; password: string; apiVersion: string }) => Promise<void>;
+  createServer: (data: ServerInput) => Promise<boolean>;
+  updateServer: (id: string, data: ServerInput) => Promise<boolean>;
+  deleteServer: (id: string) => void;
+  testServer: (id: string) => Promise<ServerStatus>;
+}
+
+export interface ServerInput {
+  slug: string;
+  name: string;
+  url: string;
+  username: string;
+  password: string;
+  apiVersion: string;
+  isDefault: boolean;
+}
+
+export interface ServerStatus {
+  connectionStatus: 'Connected' | 'Disconnected' | 'Error';
+  error: string | null;
 }

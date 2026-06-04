@@ -4,7 +4,7 @@ import type { FormEvent } from 'react';
 import { Icon } from './icons.tsx';
 import { DashGrid } from './DashGrid.tsx';
 import type { DashItem } from './DashGrid.tsx';
-import type { Ctx, User, Group } from './types.ts';
+import type { Ctx, User, Group, VeeamServer, ServerStatus } from './types.ts';
 
 const methodClass = (m: string): string => ({ GET: 'get', POST: 'post', PUT: 'post', DELETE: 'del' } as Record<string, string>)[m] || '';
 const statusClass = (c: number): string => (c >= 200 && c < 300 ? 's2' : c === 403 ? 's4' : 's1');
@@ -116,20 +116,22 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
   const [ips, setIps] = useState('');
   const [exp, setExp] = useState('');
   const [role, setRole] = useState<'Admin' | 'Viewer'>('Viewer');
-  const submit = (e: FormEvent) => { e.preventDefault(); if (!name.trim()) return; ctx.createKey({ name, userId, ips, exp, role }); setName(''); setIps(''); setExp(''); setRole('Viewer'); setOpen(false); };
+  const [keySvr, setKeySvr] = useState(''); // '' = system default VBR
+  const submit = (e: FormEvent) => { e.preventDefault(); if (!name.trim()) return; ctx.createKey({ name, userId, ips, exp, role, defaultServerId: keySvr }); setName(''); setIps(''); setExp(''); setRole('Viewer'); setKeySvr(''); setOpen(false); };
   const noUsers = ctx.users.length === 0;
   return (
     <>
       <div className="card">
         <div className="panel-head"><h2>API Credentials <span className="sub" style={{ marginLeft: 8 }}>{ctx.keys.length} total</span></h2>{ctx.isAdmin ? <button className="btn primary sm" disabled={noUsers} onClick={() => setOpen(true)}><Icon name="key" size={15} />Issue Token</button> : null}</div>
         <div className="tbl-wrap"><table className="tbl">
-          <thead><tr><th>Name</th><th>Owner</th><th>Role</th><th>Allowed IPs</th><th>Expires</th><th>Token</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Owner</th><th>Role</th><th>Default VBR</th><th>Allowed IPs</th><th>Expires</th><th>Token</th><th>Status</th><th></th></tr></thead>
           <tbody>
             {ctx.keys.map((k) => (
               <tr key={k.id}>
                 <td style={{ fontWeight: 600 }}>{k.name}</td>
                 <td><span className="tag owner"><Icon name="users" size={12} />{k.owner_name || 'Unassigned'}</span></td>
                 <td><span className={`tag ${k.role === 'Viewer' ? 'muted' : 'group'}`}>{k.role || 'Admin'}</span></td>
+                <td>{k.default_server ? <span className="tag group">{k.default_server}</span> : <span className="hint">System default</span>}</td>
                 <td className="mono-cell">{k.allowed_ips || 'Any IP'}</td>
                 <td className="mono-cell">{k.expires_at ? <span style={{ color: new Date(k.expires_at) < new Date() ? 'var(--danger)' : 'inherit' }}>{fmtDate(k.expires_at)}</span> : 'Never'}</td>
                 <td className="mono-cell">{k.token_masked}</td>
@@ -137,7 +139,7 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
                 <td>{ctx.isAdmin && k.status === 'active' ? <button className="btn danger xs" onClick={() => ctx.revokeKey(k.id)}>Revoke</button> : <span className="hint">—</span>}</td>
               </tr>
             ))}
-            {ctx.keys.length === 0 ? <tr><td colSpan={8} className="empty">No API keys issued yet.</td></tr> : null}
+            {ctx.keys.length === 0 ? <tr><td colSpan={9} className="empty">No API keys issued yet.</td></tr> : null}
           </tbody>
         </table></div>
       </div>
@@ -157,6 +159,10 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
                 <div className="field"><label className="fl">Console Role</label>
                   <select className="sel" value={role} onChange={(e) => setRole(e.target.value as 'Admin' | 'Viewer')}><option value="Viewer">Viewer — read-only dashboard</option><option value="Admin">Admin — full control</option></select>
                   <span className="hint">Viewer keys can sign in and view, but cannot change any gateway settings.</span>
+                </div>
+                <div className="field"><label className="fl">Default VBR</label>
+                  <select className="sel" value={keySvr} onChange={(e) => setKeySvr(e.target.value)}><option value="">System default</option>{ctx.servers.map((s) => <option key={s.id} value={s.id}>{s.name || s.slug}</option>)}</select>
+                  <span className="hint">Which Veeam server <code>/veeam/api/…</code> calls hit. The client can still target another with <code>/veeam/&lt;slug&gt;/…</code>.</span>
                 </div>
                 <div className="field"><label className="fl">Allowed IPs / Subnets</label><input className="inp" placeholder="e.g. 10.0.0.0/24" value={ips} onChange={(e) => setIps(e.target.value)} /><span className="hint">Comma separated. Leave empty to allow any client IP.</span></div>
                 <div className="field" style={{ marginBottom: 0 }}><label className="fl">Expiration Date</label><input className="inp" type="date" value={exp} onChange={(e) => setExp(e.target.value)} /><span className="hint">Leave empty for non-expiring credentials.</span></div>
@@ -378,7 +384,7 @@ export function LogsScreen({ ctx }: { ctx: Ctx }) {
         </div>
       </div>
       <div className="tbl-wrap"><table className="tbl">
-        <thead><tr><th>Time</th><th>Key / IP</th><th>Action</th><th>Resource</th><th>Request</th><th>Status</th><th>Message</th></tr></thead>
+        <thead><tr><th>Time</th><th>Key / IP</th><th>Action</th><th>Resource</th><th>Server</th><th>Request</th><th>Status</th><th>Message</th></tr></thead>
         <tbody>
           {rows.map((l) => (
             <tr key={l.id}>
@@ -386,48 +392,107 @@ export function LogsScreen({ ctx }: { ctx: Ctx }) {
               <td><div style={{ fontWeight: 600, fontSize: 12.5 }}>{l.key_name}</div><div className="mono-cell" style={{ fontSize: 11 }}>{l.client_ip || 'SYSTEM'}</div></td>
               <td><span className="tag muted">{l.action || 'API_CALL'}</span></td>
               <td style={{ fontSize: 12.5, fontWeight: 500 }}>{l.resource || 'General'}</td>
+              <td>{l.server ? <span className="tag group">{l.server}</span> : <span className="hint">—</span>}</td>
               <td><span className={`method ${methodClass(l.method)}`}>{l.method}</span><span className="path">{l.path}</span></td>
               <td><span className={`status-tag ${statusClass(l.status_code)}`}>{l.status_code}</span></td>
               <td style={{ fontSize: 12.5, color: l.status_code === 403 ? 'var(--danger)' : 'var(--text-muted)' }}>{l.message}</td>
             </tr>
           ))}
-          {rows.length === 0 ? <tr><td colSpan={7} className="empty">No audit logs match the current filters.</td></tr> : null}
+          {rows.length === 0 ? <tr><td colSpan={8} className="empty">No audit logs match the current filters.</td></tr> : null}
         </tbody>
       </table></div>
     </div>
   );
 }
 
-/* ---------------- VEEAM SERVER ---------------- */
-export function ConfigScreen({ ctx }: { ctx: Ctx }) {
-  const [url, setUrl] = useState(ctx.config.url);
-  const [user, setUser] = useState(ctx.config.username);
-  const [pw, setPw] = useState(ctx.config.hasPassword ? '******' : '');
-  const [ver, setVer] = useState(ctx.config.apiVersion || '1.3-rev1');
+/* ---------------- VEEAM SERVERS ---------------- */
+export function ServersScreen({ ctx }: { ctx: Ctx }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<VeeamServer | null>(null);
+  const [slug, setSlug] = useState('');
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const [user, setUser] = useState('');
+  const [pw, setPw] = useState('');
+  const [ver, setVer] = useState('1.3-rev1');
+  const [isDef, setIsDef] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [tests, setTests] = useState<Record<string, ServerStatus & { loading?: boolean }>>({});
+
+  const openAdd = () => { setEditing(null); setSlug(''); setName(''); setUrl(''); setUser(''); setPw(''); setVer('1.3-rev1'); setIsDef(ctx.servers.length === 0); setOpen(true); };
+  const openEdit = (s: VeeamServer) => { setEditing(s); setSlug(s.slug); setName(s.name || ''); setUrl(s.url); setUser(s.username); setPw(s.hasPassword ? '******' : ''); setVer(s.apiVersion); setIsDef(s.isDefault); setOpen(true); };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    try { await ctx.saveConfig({ url, username: user, password: pw, apiVersion: ver }); } finally { setSaving(false); }
+    const data = { slug, name, url, username: user, password: pw, apiVersion: ver, isDefault: isDef };
+    try {
+      const ok = editing ? await ctx.updateServer(editing.id, data) : await ctx.createServer(data);
+      if (ok) setOpen(false); // keep the form open (state intact) if the save failed
+    } finally { setSaving(false); }
   };
+  const test = async (id: string) => {
+    setTests((t) => ({ ...t, [id]: { connectionStatus: 'Disconnected', error: null, loading: true } }));
+    const r = await ctx.testServer(id);
+    setTests((t) => ({ ...t, [id]: { ...r, loading: false } }));
+  };
+
+  if (!ctx.isAdmin) {
+    return <div className="card"><div className="panel-body"><div className="callout warn"><Icon name="shield" size={16} /><span>Veeam server management is available to administrators.</span></div></div></div>;
+  }
+
   return (
-    <div style={{ maxWidth: 620, margin: '0 auto', width: '100%' }}>
+    <>
       <div className="card">
-        <div className="panel-head"><h2>Veeam Server Connection</h2></div>
-        <div className="panel-body">
-          <p className="muted-p">Credentials the proxy uses to authenticate with your Veeam Backup &amp; Replication server. Stored encrypted with AES-256-GCM.</p>
-          <form onSubmit={submit}>
-            <div className="field"><label className="fl">Veeam REST API URL</label><input className="inp" type="url" placeholder="https://192.168.0.238:9419" value={url} onChange={(e) => setUrl(e.target.value)} required disabled={!ctx.isAdmin} /><span className="hint">Include protocol and port (typically 9419)</span></div>
-            <div className="field"><label className="fl">Veeam Username</label><input className="inp" value={user} onChange={(e) => setUser(e.target.value)} required disabled={!ctx.isAdmin} /></div>
-            <div className="field"><label className="fl">Veeam Password</label><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required disabled={!ctx.isAdmin} /><span className="hint">Enter a new password to overwrite, or leave as ******</span></div>
-            <div className="field"><label className="fl">API Version</label><input className="inp" placeholder="1.3-rev1" value={ver} onChange={(e) => setVer(e.target.value)} disabled={!ctx.isAdmin} /><span className="hint">Sent as the <code>x-api-version</code> header on every Veeam call. Update when your Veeam server's REST API version changes (e.g. 1.2-rev0, 1.3-rev1).</span></div>
-            {ctx.isAdmin
-              ? <button className="btn primary" type="submit" disabled={saving} style={{ width: '100%' }}><Icon name="link" size={15} />{saving ? 'Saving…' : 'Save & Test Connection'}</button>
-              : <div className="callout warn"><Icon name="shield" size={16} /><span>Read-only access — connection settings can only be changed by an administrator.</span></div>}
-          </form>
-        </div>
+        <div className="panel-head"><h2>Veeam Servers <span className="sub" style={{ marginLeft: 8 }}>{ctx.servers.length}</span></h2><button className="btn primary sm" onClick={openAdd}><Icon name="server" size={15} />Add Server</button></div>
+        <div className="tbl-wrap"><table className="tbl">
+          <thead><tr><th>Name</th><th>Slug</th><th>URL</th><th>API Version</th><th>Default</th><th>Connection</th><th></th></tr></thead>
+          <tbody>
+            {ctx.servers.map((s) => {
+              const t = tests[s.id];
+              return (
+                <tr key={s.id}>
+                  <td style={{ fontWeight: 600 }}>{s.name || s.slug}</td>
+                  <td><span className="tag group">{s.slug}</span></td>
+                  <td className="mono-cell">{s.url}</td>
+                  <td className="mono-cell">{s.apiVersion}</td>
+                  <td>{s.isDefault ? <span className="tag allow">Default</span> : <span className="hint">—</span>}</td>
+                  <td>{t?.loading
+                    ? <span className="hint">Testing…</span>
+                    : t
+                      ? <span className={`pill ${t.connectionStatus === 'Connected' ? 'ok' : 'danger'}`} title={t.error || undefined}><span className={`dot ${t.connectionStatus === 'Connected' ? 'ok' : 'danger'}`}></span>{t.connectionStatus}</span>
+                      : <button className="btn ghost xs" onClick={() => test(s.id)}>Test</button>}</td>
+                  <td><div className="row-actions">
+                    <button className="btn ghost xs" onClick={() => openEdit(s)}>Edit</button>
+                    {!s.isDefault ? <button className="btn danger xs" onClick={() => ctx.deleteServer(s.id)}>Delete</button> : null}
+                  </div></td>
+                </tr>
+              );
+            })}
+            {ctx.servers.length === 0 ? <tr><td colSpan={7} className="empty">No Veeam servers configured. Add one to start proxying.</td></tr> : null}
+          </tbody>
+        </table></div>
       </div>
-    </div>
+
+      {open ? (
+        <div className="overlay" onClick={() => setOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head"><h2>{editing ? 'Edit' : 'Add'} Veeam Server</h2><p>The password is stored encrypted (AES-256-GCM) and is never returned by the API.</p></div>
+            <form onSubmit={submit}>
+              <div className="modal-body">
+                <div className="field"><label className="fl">Display Name</label><input className="inp" placeholder="e.g. Production VBR" value={name} onChange={(e) => setName(e.target.value)} /></div>
+                <div className="field"><label className="fl">Slug (URL segment)</label><input className="inp" placeholder="e.g. prod" value={slug} onChange={(e) => setSlug(e.target.value)} required /><span className="hint">Addressed as <code>/veeam/&lt;slug&gt;/…</code> — lowercase/URL-safe, and not <code>api</code>.</span></div>
+                <div className="field"><label className="fl">Veeam REST API URL</label><input className="inp" type="url" placeholder="https://192.168.0.238:9419" value={url} onChange={(e) => setUrl(e.target.value)} required /><span className="hint">Include protocol and port (typically 9419).</span></div>
+                <div className="field"><label className="fl">Username</label><input className="inp" value={user} onChange={(e) => setUser(e.target.value)} required /></div>
+                <div className="field"><label className="fl">Password</label><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required={!editing} /><span className="hint">{editing ? 'Leave as ****** to keep the current password.' : ''}</span></div>
+                <div className="field"><label className="fl">API Version</label><input className="inp" placeholder="1.3-rev1" value={ver} onChange={(e) => setVer(e.target.value)} /><span className="hint">Sent as the <code>x-api-version</code> header. Update when this server's REST API version changes.</span></div>
+                <label className="check-row" style={{ marginBottom: 0 }}><input type="checkbox" checked={isDef} disabled={!!editing && editing.isDefault} onChange={(e) => setIsDef(e.target.checked)} /><span className="cr-text"><b>Default server</b><span>{editing && editing.isDefault ? 'This is the default. To move it, set another server as default.' : "Used when a key or request doesn't name a specific server."}</span></span></label>
+              </div>
+              <div className="modal-foot"><button type="button" className="btn ghost" onClick={() => setOpen(false)}>Cancel</button><button type="submit" className="btn primary" disabled={saving}><Icon name="server" size={15} />{saving ? 'Saving…' : (editing ? 'Save Changes' : 'Add Server')}</button></div>
+            </form>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }
 

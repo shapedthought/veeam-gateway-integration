@@ -93,6 +93,14 @@ swappable.
   request body unchanged, and MUST relay Veeam's status code and body back to the
   client (it MUST NOT collapse Veeam error codes into 200).
 - The client MUST NOT need to know the Veeam base URL, credentials, or API version.
+- **Server selection (multi-backend).** The gateway MAY front multiple Veeam servers. When
+  it does, the first path segment after `/veeam` selects the target: `api`
+  (`/veeam/api/…`) routes to the caller's **default** server, and any other first segment
+  is a **server slug** (`/veeam/<slug>/api/…`). Real Veeam paths always begin with `/api`,
+  which keeps the two unambiguous and **backward compatible** with single-server clients.
+  An unrecognized slug MUST yield `404`, and the slug MUST be stripped before schema
+  validation and forwarding. Authorization (§4.2) is evaluated against the resolved target
+  server, so a policy rule MAY be scoped to a specific server.
 
 ### 3.3 The health surface — `GET /api/status`
 
