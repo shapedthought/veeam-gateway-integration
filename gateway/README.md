@@ -13,10 +13,12 @@ Before building, create an `.env` configuration file in this directory to declar
 VEEAM_API_URL=https://192.168.0.238:9419
 VEEAM_USERNAME=your_veeam_user
 VEEAM_PASSWORD=your_veeam_password
+VEEAM_API_VERSION=1.3-rev1
 ADMIN_API_KEY=veeam_vproxy_my_custom_admin_key_12345
 ENCRYPTION_KEY=my_secure_symmetric_encryption_key_here
 ```
 > [!NOTE]
+> - The `VEEAM_*` values seed the **default** Veeam server on first run only; afterwards servers are managed in the dashboard, and you can add more (see *Managing multiple Veeam servers* below). `VEEAM_API_VERSION` is optional and defaults to `1.3-rev1`.
 > - If you omit `ADMIN_API_KEY`, a random one will be generated at startup and printed to the container logs (`docker logs veeam-gateway`).
 > - The `ENCRYPTION_KEY` is optional but highly recommended to encrypt stored passwords in the SQLite database. If omitted, the `ADMIN_API_KEY` (or a static default) is used as a fallback.
 
@@ -105,12 +107,12 @@ The console has six screens:
 | **API Keys** | Issue and revoke the proxy keys clients use to authenticate to the gateway. |
 | **Users** | Proxy users and their security-group membership. |
 | **Security** | Group access policies (`ALLOW`/`DENY` rules over Veeam paths) and system-wide global block rules. |
-| **Audit Logs** | Every request and authorization decision routed through the gateway. |
-| **Veeam Server** | The backend Veeam connection settings (URL / username / password). |
+| **Audit Logs** | Every request and authorization decision routed through the gateway (incl. which Veeam server it hit). |
+| **Veeam Servers** | Manage the Veeam Backup & Replication server(s) the gateway proxies to — add / edit / delete, set the default, and test connectivity. |
 
 ### First-time setup
 
-1. **Veeam Server** → enter your Veeam REST API URL (e.g. `https://192.168.0.238:9419`), username, and password → **Save & Test Connection**. The password is stored encrypted (see Security Architecture below) and is never returned by the API.
+1. **Veeam Servers → Add Server**: give it a slug, your Veeam REST API URL (e.g. `https://192.168.0.238:9419`), username, password, and (optionally) API version → save, then **Test**. The password is stored encrypted (see Security Architecture below) and is never returned by the API. *(If you set the `VEEAM_*` env vars, a **default** server is already seeded.)*
 2. **Users** → register the people/agents that will hold keys, and assign them to security groups.
 3. **API Keys** → issue a key for each client. The full token is shown **once** at creation — copy it then.
 
@@ -124,6 +126,15 @@ Every API key has a **console role**, chosen when you issue it:
 > New keys **default to Viewer** (least privilege). Choose **Admin** explicitly when you need an administrative key.
 
 A key's **console role is independent of its Veeam access**: what a key may call through the `/veeam/*` proxy is governed by its user's **group policies** (Security screen), not by the Admin/Viewer role. So a true "look but touch nothing" key needs both a Viewer role *and* a user with no (or read-only) Veeam permissions.
+
+### Managing multiple Veeam servers
+
+The gateway can front **multiple** Veeam Backup & Replication servers at once:
+
+- **Add servers** on the **Veeam Servers** screen. Each has a unique **slug** (used in URLs), its own URL / credentials / API version, and exactly one is the **default**.
+- **Routing** — a request to `/veeam/api/…` hits the key's **Default VBR** (or the system default); to target another server explicitly, insert its slug: `/veeam/<slug>/api/…`. (Real Veeam paths start with `/api`, so any other first segment is read as a server slug; an unknown slug returns `404`.)
+- **Per-key default** — set a key's **Default VBR** when issuing it (API Keys screen) so single-server clients never have to name a server.
+- **Per-server access control** — group policy rules can apply to **All servers** or a **specific** one (Security screen → the rule's *Server* field), so a user can be allowed on one VBR and denied on another. Unscoped rules apply everywhere.
 
 ### Generating a view-only (Viewer) key
 
@@ -149,7 +160,7 @@ The gateway is built from the ground up to act as a secure boundary shielding yo
 
 ### 2. Configuration & Password Storage
 Connection settings can be initialized via environment variables (`.env`) or modified dynamically in the dashboard UI.
-* **Symmetric Encryption (AES-256-GCM)**: To protect credentials on-disk, the Veeam password is encrypted in the SQLite database using authenticated AES-256-GCM encryption. The stored format is `iv:authTag:ciphertext`.
+* **Symmetric Encryption (AES-256-GCM)**: To protect credentials on-disk, each Veeam server's password is encrypted in the SQLite database using authenticated AES-256-GCM encryption. The stored format is `iv:authTag:ciphertext`.
 * **Master Key Derivation**: The encryption key is derived using a SHA-256 hash of the `ENCRYPTION_KEY` environment variable. If `ENCRYPTION_KEY` is not set, `ADMIN_API_KEY` is used as a fallback, followed by a static key.
 * **Auto-Migration of Legacy Credentials**: The gateway maintains backward compatibility with older gateway setups. Upon server startup, if a plaintext (unencrypted) password is found in the database, the gateway reads it, automatically encrypts it using the current key, and updates the database row.
 * **Zero-Leak GET API**: The API endpoint to retrieve settings (`GET /api/config`) is restricted to the **Admin** role. For security, it **never returns the password** in plaintext; it only returns a boolean flag (`hasPassword: true`) to let the frontend know a password is set.
@@ -166,7 +177,7 @@ Every request routed through the `/veeam/*` proxy endpoint passes through three 
     3.  **Explicit ALLOW** — at least one matching `ALLOW` rule from the caller's groups permits the request, and it is forwarded to Veeam.
     4.  **Default deny** — no matching ALLOW rule → `403`.
 
-    Rules match on HTTP method (or `*`) and glob path patterns (e.g. `/api/v1/jobs/*`). A key's Veeam permissions are the **union of its owner's group rules** — there are no fixed per-key proxy roles. (The separate **Admin/Viewer** role on a key governs the management dashboard under `/api/*`, *not* this `/veeam` policy — see *How to Use the Dashboard* above.)
+    Rules match on HTTP method (or `*`) and glob path patterns (e.g. `/api/v1/jobs/*`), and may be **scoped to a specific Veeam server** (or all servers) — the request's resolved target server is part of the match. A key's Veeam permissions are the **union of its owner's group rules** — there are no fixed per-key proxy roles. (The separate **Admin/Viewer** role on a key governs the management dashboard under `/api/*`, *not* this `/veeam` policy — see *How to Use the Dashboard* above.)
 
 ---
 
