@@ -3,7 +3,7 @@ import type { FormEvent } from 'react';
 import { Icon } from './icons.tsx';
 import type { IconName } from './icons.tsx';
 import {
-  DashboardScreen, KeysScreen, UsersScreen, SecurityScreen, LogsScreen, ConfigScreen,
+  DashboardScreen, KeysScreen, UsersScreen, SecurityScreen, LogsScreen, ServersScreen,
   RevealModal, UserGroupsModal, CreateGroupModal,
 } from './screens.tsx';
 import type { ApiKey, GlobalRule, Group, User, AuditLog, StatusInfo, TabId, Ctx, ConfigInfo, GroupRule, VeeamServer } from './types.ts';
@@ -28,7 +28,7 @@ const NAV: { id: TabId; icon: IconName; label: string }[] = [
   { id: 'users', icon: 'users', label: 'Users' },
   { id: 'security', icon: 'shield', label: 'Security' },
   { id: 'logs', icon: 'logs', label: 'Audit Logs' },
-  { id: 'config', icon: 'server', label: 'Veeam Server' },
+  { id: 'config', icon: 'server', label: 'Veeam Servers' },
 ];
 
 const PAGE_META: Record<TabId, [string, string]> = {
@@ -37,7 +37,7 @@ const PAGE_META: Record<TabId, [string, string]> = {
   users: ['Users', 'Manage proxy users and group membership'],
   security: ['Security', 'Role-based access policies & global rules'],
   logs: ['Audit Logs', 'Every request routed through the gateway'],
-  config: ['Veeam Server', 'Backend connection settings'],
+  config: ['Veeam Servers', 'Manage the backup servers this gateway proxies to'],
 };
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -133,8 +133,8 @@ export default function App() {
 
   const ctx: Ctx = {
     keys, users, groups, servers, rules, logs, config, status, isAdmin: !!status?.isAdmin, toast, go: setTab,
-    createKey: async ({ name, userId, ips, exp, role }) => {
-      const res = await post('keys', { name, userId, role, expiresAt: exp || null, allowedIps: ips || null });
+    createKey: async ({ name, userId, ips, exp, role, defaultServerId }) => {
+      const res = await post('keys', { name, userId, role, defaultServerId: defaultServerId || null, expiresAt: exp || null, allowedIps: ips || null });
       if (res) { const data = await res.json(); setModal({ type: 'reveal', name: data.name, token: data.token }); fetchData(); }
     },
     revokeKey: async (id) => {
@@ -194,6 +194,31 @@ export default function App() {
       const res = await post('config', { url, username, password, apiVersion }, 'Settings saved · testing connection');
       if (res) fetchData();
     },
+    createServer: async (data) => {
+      const res = await post('servers', data, 'Server added');
+      if (res) fetchData();
+    },
+    updateServer: async (id, data) => {
+      try {
+        const res = await fetch(getApiUrl(`servers/${id}`), { method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(data) });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'Failed to update server'); return; }
+        toast('Server updated'); fetchData();
+      } catch (err) { alert(errMsg(err)); }
+    },
+    deleteServer: async (id) => {
+      if (!confirm('Delete this Veeam server? Keys defaulting to it fall back to the system default, and rules scoped to it stop matching.')) return;
+      try {
+        const res = await fetch(getApiUrl(`servers/${id}`), { method: 'DELETE', headers: jsonHeaders() });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'Failed to delete server'); return; }
+        toast('Server deleted'); fetchData();
+      } catch (err) { alert(errMsg(err)); }
+    },
+    testServer: async (id) => {
+      try {
+        const res = await fetch(getApiUrl(`servers/${id}/status`), { headers: jsonHeaders() });
+        return await res.json();
+      } catch (err) { return { connectionStatus: 'Error' as const, error: errMsg(err) }; }
+    },
   };
 
   const saveUserGroups = async (userId: string, gids: string[]) => {
@@ -244,7 +269,7 @@ export default function App() {
       case 'users': return <UsersScreen ctx={ctx} />;
       case 'security': return <SecurityScreen ctx={ctx} />;
       case 'logs': return <LogsScreen ctx={ctx} />;
-      case 'config': return <ConfigScreen ctx={ctx} />;
+      case 'config': return <ServersScreen ctx={ctx} />;
       default: return <DashboardScreen ctx={ctx} />;
     }
   };
