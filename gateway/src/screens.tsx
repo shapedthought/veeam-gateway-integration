@@ -400,11 +400,12 @@ export function ConfigScreen({ ctx }: { ctx: Ctx }) {
   const [url, setUrl] = useState(ctx.config.url);
   const [user, setUser] = useState(ctx.config.username);
   const [pw, setPw] = useState(ctx.config.hasPassword ? '******' : '');
+  const [ver, setVer] = useState(ctx.config.apiVersion || '1.3-rev1');
   const [saving, setSaving] = useState(false);
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
-    try { await ctx.saveConfig({ url, username: user, password: pw }); } finally { setSaving(false); }
+    try { await ctx.saveConfig({ url, username: user, password: pw, apiVersion: ver }); } finally { setSaving(false); }
   };
   return (
     <div style={{ maxWidth: 620, margin: '0 auto', width: '100%' }}>
@@ -416,6 +417,7 @@ export function ConfigScreen({ ctx }: { ctx: Ctx }) {
             <div className="field"><label className="fl">Veeam REST API URL</label><input className="inp" type="url" placeholder="https://192.168.0.238:9419" value={url} onChange={(e) => setUrl(e.target.value)} required disabled={!ctx.isAdmin} /><span className="hint">Include protocol and port (typically 9419)</span></div>
             <div className="field"><label className="fl">Veeam Username</label><input className="inp" value={user} onChange={(e) => setUser(e.target.value)} required disabled={!ctx.isAdmin} /></div>
             <div className="field"><label className="fl">Veeam Password</label><input className="inp" type="password" value={pw} onChange={(e) => setPw(e.target.value)} required disabled={!ctx.isAdmin} /><span className="hint">Enter a new password to overwrite, or leave as ******</span></div>
+            <div className="field"><label className="fl">API Version</label><input className="inp" placeholder="1.3-rev1" value={ver} onChange={(e) => setVer(e.target.value)} disabled={!ctx.isAdmin} /><span className="hint">Sent as the <code>x-api-version</code> header on every Veeam call. Update when your Veeam server's REST API version changes (e.g. 1.2-rev0, 1.3-rev1).</span></div>
             {ctx.isAdmin
               ? <button className="btn primary" type="submit" disabled={saving} style={{ width: '100%' }}><Icon name="link" size={15} />{saving ? 'Saving…' : 'Save & Test Connection'}</button>
               : <div className="callout warn"><Icon name="shield" size={16} /><span>Read-only access — connection settings can only be changed by an administrator.</span></div>}

@@ -58,7 +58,7 @@ export default function App() {
   const [groups, setGroups] = useState<Group[]>([]);
   const [rules, setRules] = useState<GlobalRule[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
-  const [config, setConfig] = useState<ConfigInfo>({ url: '', username: '', hasPassword: false });
+  const [config, setConfig] = useState<ConfigInfo>({ url: '', username: '', hasPassword: false, apiVersion: '1.3-rev1' });
 
   const [modal, setModal] = useState<Modal>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -96,7 +96,7 @@ export default function App() {
       const configRes = await fetch(getApiUrl('config'), { headers });
       if (configRes.ok) {
         const c = await configRes.json();
-        setConfig({ url: c.url || '', username: c.username || '', hasPassword: !!c.hasPassword });
+        setConfig({ url: c.url || '', username: c.username || '', hasPassword: !!c.hasPassword, apiVersion: c.apiVersion || '1.3-rev1' });
       }
       const usersRes = await fetch(getApiUrl('users'), { headers });
       if (usersRes.ok) setUsers(await usersRes.json());
@@ -180,8 +180,8 @@ export default function App() {
         fetchData();
       } catch (err) { alert(errMsg(err)); }
     },
-    saveConfig: async ({ url, username, password }) => {
-      const res = await post('config', { url, username, password }, 'Settings saved · testing connection');
+    saveConfig: async ({ url, username, password, apiVersion }) => {
+      const res = await post('config', { url, username, password, apiVersion }, 'Settings saved · testing connection');
       if (res) fetchData();
     },
   };

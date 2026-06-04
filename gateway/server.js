@@ -105,10 +105,12 @@ const dbGet = (query, params = []) => {
 };
 
 // --- Veeam Connection Configuration in DB ---
+const DEFAULT_VEEAM_API_VERSION = '1.3-rev1';
 let veeamConfig = {
   url: process.env.VEEAM_API_URL || '',
   username: process.env.VEEAM_USERNAME || '',
-  password: process.env.VEEAM_PASSWORD || ''
+  password: process.env.VEEAM_PASSWORD || '',
+  apiVersion: process.env.VEEAM_API_VERSION || DEFAULT_VEEAM_API_VERSION
 };
 
 async function loadVeeamConfigFromDb() {
@@ -117,6 +119,7 @@ async function loadVeeamConfigFromDb() {
     for (const row of rows) {
       if (row.key === 'veeam_url') veeamConfig.url = row.value;
       if (row.key === 'veeam_username') veeamConfig.username = row.value;
+      if (row.key === 'veeam_api_version' && row.value) veeamConfig.apiVersion = row.value;
       if (row.key === 'veeam_password') {
         const decrypted = decrypt(row.value);
         veeamConfig.password = decrypted;
@@ -167,6 +170,7 @@ async function initDb() {
       const encryptedValue = encrypt(process.env.VEEAM_PASSWORD);
       await dbRun('INSERT INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue]);
     }
+    if (process.env.VEEAM_API_VERSION) await dbRun('INSERT INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_api_version', process.env.VEEAM_API_VERSION]);
     console.log('[DB] Seeded veeam_config from environment variables');
   }
 
@@ -468,7 +472,7 @@ async function getVeeamToken() {
     const response = await axios.post(`${veeamUrl}/api/oauth2/token`, params, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'x-api-version': '1.3-rev1',
+        'x-api-version': veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION,
       },
       httpsAgent,
       timeout: 5000 // Fail fast if Veeam is unreachable
@@ -767,7 +771,7 @@ app.get('/api/status', authenticateApiKey, async (req, res) => {
         await axios.get(`${veeamConfig.url}/api/v1/backupInfrastructure/repositories?limit=1`, {
           headers: {
             'Authorization': `Bearer ${token}`,
-            'x-api-version': '1.3-rev1',
+            'x-api-version': veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION,
           },
           httpsAgent,
           timeout: 3000 // Check connectivity quickly
@@ -1148,7 +1152,8 @@ app.get('/api/config', authenticateApiKey, async (req, res) => {
   res.json({
     url: veeamConfig.url,
     username: veeamConfig.username,
-    hasPassword: !!veeamConfig.password
+    hasPassword: !!veeamConfig.password,
+    apiVersion: veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION
   });
 });
 
@@ -1162,14 +1167,17 @@ app.post('/api/config', authenticateApiKey, async (req, res) => {
   if (req.keyInfo.role !== 'Admin') {
     return res.status(403).json({ error: 'Only administrators can update settings' });
   }
-  const { url, username, password } = req.body;
+  const { url, username, password, apiVersion } = req.body;
   if (!url || !username) {
     return res.status(400).json({ error: 'URL and Username are required' });
   }
   try {
     await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_url', url]);
     await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_username', username]);
-    
+    // API version: fall back to the default if cleared, so a Veeam version bump is just a UI edit.
+    const versionToSave = (apiVersion && apiVersion.trim()) || DEFAULT_VEEAM_API_VERSION;
+    await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_api_version', versionToSave]);
+
     // Only update password if provided and not masked placeholder
     if (password && password !== '******') {
       const encryptedValue = encrypt(password);
@@ -1206,7 +1214,7 @@ app.all('/veeam/*', authenticateApiKey, validateVeeamEndpoint, authorizeRequest,
     const token = await getVeeamToken();
     const proxyHeaders = {
       'Authorization': `Bearer ${token}`,
-      'x-api-version': '1.3-rev1',
+      'x-api-version': veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION,
       'Content-Type': headers['content-type'] || 'application/json',
       'Accept': headers['accept'] || 'application/json',
     };

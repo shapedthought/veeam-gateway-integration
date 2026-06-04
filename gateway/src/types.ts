@@ -73,6 +73,7 @@ export interface ConfigInfo {
   url: string;
   username: string;
   hasPassword: boolean;
+  apiVersion: string;
 }
 
 /** Context object handed to every screen component. */
@@ -98,5 +99,5 @@ export interface Ctx {
   deleteGroupRule: (groupId: string, index: number) => void;
   addGlobalRule: (rule: { method: string; path_pattern: string; description: string }) => void;
   deleteGlobalRule: (id: number) => void;
-  saveConfig: (data: { url: string; username: string; password: string }) => Promise<void>;
+  saveConfig: (data: { url: string; username: string; password: string; apiVersion: string }) => Promise<void>;
 }
