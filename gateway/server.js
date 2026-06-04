@@ -125,7 +125,7 @@ async function loadVeeamConfigFromDb() {
         veeamConfig.password = decrypted;
         
         // Auto-migration: if the stored database value was legacy plaintext, update it to encrypted format
-        if (decrypted && decrypted === row.value && !row.value.includes(':')) {
+        if (decrypted && row.value.split(':').length !== 3) {
           const encryptedValue = encrypt(decrypted);
           dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue])
             .then(() => console.log('[CONFIG] Legacy plaintext Veeam password automatically migrated to encrypted format in DB.'))
@@ -168,8 +168,10 @@ async function loadServersFromDb() {
     let def = null;
     for (const r of rows) {
       const password = decrypt(r.password || '');
-      // Auto-migrate a legacy plaintext password to encrypted-at-rest form.
-      if (password && password === r.password && !(r.password || '').includes(':')) {
+      // Auto-migrate a legacy plaintext password to encrypted-at-rest form. Encrypted
+      // values have the 3-part iv:authTag:ciphertext shape; anything else is plaintext
+      // (key off the part count so passwords containing ':' still get migrated).
+      if (password && (r.password || '').split(':').length !== 3) {
         dbRun('UPDATE veeam_servers SET password = ? WHERE id = ?', [encrypt(password), r.id]).catch(() => {});
       }
       next.set(r.id, { id: r.id, slug: r.slug, name: r.name, url: r.url, username: r.username, password, apiVersion: r.api_version || DEFAULT_VEEAM_API_VERSION, isDefault: !!r.is_default });
@@ -945,8 +947,13 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
   }
   // Default to least-privilege Viewer; only an explicit 'Admin' grants control-plane admin.
   const keyRole = role === 'Admin' ? 'Admin' : 'Viewer';
-  // Optional default VBR — must be a known server; null means "use the system default at request time".
-  const keyServerId = (defaultServerId && servers.has(defaultServerId)) ? defaultServerId : null;
+  // Optional default VBR — if provided it must be a known server (reject typos rather
+  // than silently falling back to the system default). null = use system default at request time.
+  let keyServerId = null;
+  if (defaultServerId) {
+    if (!servers.has(defaultServerId)) return res.status(400).json({ error: `Unknown defaultServerId '${defaultServerId}'` });
+    keyServerId = defaultServerId;
+  }
 
   try {
     const token = 'veeam_vproxy_' + crypto.randomBytes(24).toString('hex');
@@ -1316,6 +1323,33 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/i;
 // List servers (any authenticated key; passwords never returned)
 app.get('/api/servers', authenticateApiKey, async (req, res) => {
   res.json([...servers.values()].map(publicServer));
+});
+
+// Test one server's connectivity (any authenticated key) — same probe as /api/status,
+// so admins can validate credentials / reachability before routing to it.
+app.get('/api/servers/:id/status', authenticateApiKey, async (req, res) => {
+  const server = servers.get(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  const result = { id: server.id, slug: server.slug, connectionStatus: 'Disconnected', error: null };
+  try {
+    const token = await getVeeamToken(server);
+    try {
+      await axios.get(`${server.url}/api/v1/backupInfrastructure/repositories?limit=1`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'x-api-version': server.apiVersion || DEFAULT_VEEAM_API_VERSION },
+        httpsAgent,
+        timeout: 3000
+      });
+      result.connectionStatus = 'Connected';
+    } catch (pingErr) {
+      // 403 from Veeam still proves we authenticated and reached the server.
+      if (pingErr.response?.status === 403) result.connectionStatus = 'Connected';
+      else throw pingErr;
+    }
+  } catch (err) {
+    result.connectionStatus = 'Error';
+    result.error = err.response?.data?.message || err.message;
+  }
+  res.json(result);
 });
 
 // Create a server (Admin)
