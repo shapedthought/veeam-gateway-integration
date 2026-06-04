@@ -26,6 +26,19 @@ export interface GroupRule {
   method: string;
   path_pattern: string;
   description: string;
+  server_id?: string | null;   // null/undefined/'*' = applies to all servers
+  server_slug?: string | null; // display only (joined server-side)
+}
+
+export interface VeeamServer {
+  id: string;
+  slug: string;
+  name: string;
+  url: string;
+  username: string;
+  hasPassword: boolean;
+  apiVersion: string;
+  isDefault: boolean;
 }
 
 export interface Group {
@@ -81,6 +94,7 @@ export interface Ctx {
   keys: ApiKey[];
   users: User[];
   groups: Group[];
+  servers: VeeamServer[];
   rules: GlobalRule[];
   logs: AuditLog[];
   config: ConfigInfo;

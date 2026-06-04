@@ -343,6 +343,7 @@ async function initDb() {
   await addColumnIfMissing('audit_logs', 'action', 'TEXT');
   await addColumnIfMissing('audit_logs', 'resource', 'TEXT');
   await addColumnIfMissing('audit_logs', 'server', 'TEXT');
+  await addColumnIfMissing('group_rules', 'server_id', 'TEXT');
 
   // Seed default admin user
   const userCount = await dbGet('SELECT count(*) as count FROM users');
@@ -813,7 +814,7 @@ async function authorizeRequest(req, res, next) {
 
   try {
     const userRules = await dbAll(`
-      SELECT gr.effect, gr.method, gr.path_pattern, g.name as group_name
+      SELECT gr.effect, gr.method, gr.path_pattern, gr.server_id, g.name as group_name
       FROM group_rules gr
       JOIN user_groups ug ON gr.group_id = ug.group_id
       JOIN groups g ON ug.group_id = g.id
@@ -823,12 +824,15 @@ async function authorizeRequest(req, res, next) {
     let isAllowed = false;
     let isDenied = false;
     let matchingDenyRule = null;
+    const targetServerId = req.targetServer ? req.targetServer.id : null;
 
     for (const rule of userRules) {
       const methodMatches = rule.method === '*' || rule.method.toUpperCase() === method.toUpperCase();
       const pathMatches = pathMatchesPattern(veeamPath, rule.path_pattern);
+      // A rule with no server_id (or '*') applies to every VBR; otherwise it must match the target server.
+      const serverMatches = !rule.server_id || rule.server_id === '*' || rule.server_id === targetServerId;
 
-      if (methodMatches && pathMatches) {
+      if (methodMatches && pathMatches && serverMatches) {
         if (rule.effect === 'DENY') {
           isDenied = true;
           matchingDenyRule = rule;
@@ -1123,7 +1127,7 @@ app.get('/api/groups', authenticateApiKey, async (req, res) => {
     const groups = await dbAll('SELECT * FROM groups ORDER BY name ASC');
     const formatted = [];
     for (const g of groups) {
-      const rules = await dbAll('SELECT id, effect, method, path_pattern, description FROM group_rules WHERE group_id = ?', [g.id]);
+      const rules = await dbAll('SELECT gr.id, gr.effect, gr.method, gr.path_pattern, gr.description, gr.server_id, vs.slug as server_slug FROM group_rules gr LEFT JOIN veeam_servers vs ON gr.server_id = vs.id WHERE gr.group_id = ?', [g.id]);
       formatted.push({
         ...g,
         rules
@@ -1145,6 +1149,14 @@ app.post('/api/groups', authenticateApiKey, async (req, res) => {
     return res.status(400).json({ error: 'Group Name is required' });
   }
   const groupId = id || crypto.randomUUID();
+  // Validate any per-rule server scopes up front (before writes) — '*'/empty = all servers.
+  if (rules && Array.isArray(rules)) {
+    for (const rule of rules) {
+      if (rule.server_id && rule.server_id !== '*' && !servers.has(rule.server_id)) {
+        return res.status(400).json({ error: `Unknown server_id '${rule.server_id}' in a rule` });
+      }
+    }
+  }
   try {
     await dbRun('INSERT OR REPLACE INTO groups (id, name, description) VALUES (?, ?, ?)', [
       groupId, name, description || ''
@@ -1155,8 +1167,9 @@ app.post('/api/groups', authenticateApiKey, async (req, res) => {
       await dbRun('DELETE FROM group_rules WHERE group_id = ?', [groupId]);
       for (const rule of rules) {
         const ruleId = crypto.randomUUID();
-        await dbRun('INSERT INTO group_rules (id, group_id, effect, method, path_pattern, description) VALUES (?, ?, ?, ?, ?, ?)', [
-          ruleId, groupId, rule.effect, rule.method, rule.path_pattern, rule.description || ''
+        const ruleServerId = (rule.server_id && rule.server_id !== '*') ? rule.server_id : null; // null = all servers
+        await dbRun('INSERT INTO group_rules (id, group_id, effect, method, path_pattern, description, server_id) VALUES (?, ?, ?, ?, ?, ?, ?)', [
+          ruleId, groupId, rule.effect, rule.method, rule.path_pattern, rule.description || '', ruleServerId
         ]);
       }
     }

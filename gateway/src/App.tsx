@@ -6,7 +6,7 @@ import {
   DashboardScreen, KeysScreen, UsersScreen, SecurityScreen, LogsScreen, ConfigScreen,
   RevealModal, UserGroupsModal, CreateGroupModal,
 } from './screens.tsx';
-import type { ApiKey, GlobalRule, Group, User, AuditLog, StatusInfo, TabId, Ctx, ConfigInfo, GroupRule } from './types.ts';
+import type { ApiKey, GlobalRule, Group, User, AuditLog, StatusInfo, TabId, Ctx, ConfigInfo, GroupRule, VeeamServer } from './types.ts';
 import './index.css';
 
 const getApiUrl = (suffix: string): string => {
@@ -56,6 +56,7 @@ export default function App() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
+  const [servers, setServers] = useState<VeeamServer[]>([]);
   const [rules, setRules] = useState<GlobalRule[]>([]);
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [config, setConfig] = useState<ConfigInfo>({ url: '', username: '', hasPassword: false, apiVersion: '1.3-rev1' });
@@ -81,7 +82,8 @@ export default function App() {
       const statusRes = await fetch(getApiUrl('status'), { headers });
       if (statusRes.status === 401) { setIsAuthorized(false); setAuthError('Invalid Admin API key.'); return; }
       if (!statusRes.ok) throw new Error('Failed to load status');
-      setStatus(await statusRes.json());
+      const statusData = await statusRes.json();
+      setStatus(statusData);
       setIsAuthorized(true);
       setAuthError(null);
       localStorage.setItem('vproxy_admin_token', tokenToUse);
@@ -102,6 +104,14 @@ export default function App() {
       if (usersRes.ok) setUsers(await usersRes.json());
       const groupsRes = await fetch(getApiUrl('groups'), { headers });
       if (groupsRes.ok) setGroups(await groupsRes.json());
+      // Servers carry connection details (url/username) and are only consumed by admin-only
+      // editors (rule scope selector, and Phase 3 server/key management) — skip for Viewers.
+      if (statusData.isAdmin) {
+        const serversRes = await fetch(getApiUrl('servers'), { headers });
+        if (serversRes.ok) setServers(await serversRes.json());
+      } else {
+        setServers([]);
+      }
     } catch (err) {
       setAuthError(`Connection failed: ${errMsg(err)}`);
     }
@@ -122,7 +132,7 @@ export default function App() {
   };
 
   const ctx: Ctx = {
-    keys, users, groups, rules, logs, config, status, isAdmin: !!status?.isAdmin, toast, go: setTab,
+    keys, users, groups, servers, rules, logs, config, status, isAdmin: !!status?.isAdmin, toast, go: setTab,
     createKey: async ({ name, userId, ips, exp, role }) => {
       const res = await post('keys', { name, userId, role, expiresAt: exp || null, allowedIps: ips || null });
       if (res) { const data = await res.json(); setModal({ type: 'reveal', name: data.name, token: data.token }); fetchData(); }
