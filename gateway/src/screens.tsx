@@ -242,7 +242,8 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
   const [meth, setMeth] = useState('*');
   const [pat, setPat] = useState('*');
   const [desc, setDesc] = useState('');
-  const addRule = (e: FormEvent) => { e.preventDefault(); if (!group) return; ctx.addGroupRule(group.id, { effect: eff, method: meth, path_pattern: pat, description: desc || `${eff} ${meth} on ${pat}` }); setPat('*'); setDesc(''); };
+  const [svr, setSvr] = useState(''); // '' = all servers
+  const addRule = (e: FormEvent) => { e.preventDefault(); if (!group) return; ctx.addGroupRule(group.id, { effect: eff, method: meth, path_pattern: pat, description: desc || `${eff} ${meth} on ${pat}`, server_id: svr || null }); setPat('*'); setDesc(''); };
 
   const [gOpen, setGOpen] = useState(false);
   const [gm, setGm] = useState('DELETE');
@@ -276,18 +277,19 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
               </div>
 
               <div className="tbl-wrap"><table className="tbl" style={{ marginBottom: 22 }}>
-                <thead><tr><th>Effect</th><th>Method</th><th>Path Pattern</th><th>Description</th><th></th></tr></thead>
+                <thead><tr><th>Effect</th><th>Method</th><th>Server</th><th>Path Pattern</th><th>Description</th><th></th></tr></thead>
                 <tbody>
                   {(group.rules || []).map((r, i) => (
                     <tr key={i}>
                       <td><span className={`tag ${r.effect === 'DENY' ? 'deny' : 'allow'}`}>{r.effect}</span></td>
                       <td><span className={`method ${methodClass(r.method)}`}>{r.method}</span></td>
+                      <td>{r.server_id && r.server_id !== '*' ? <span className="tag group">{r.server_slug || 'server'}</span> : <span className="hint">All</span>}</td>
                       <td className="path">{r.path_pattern}</td>
                       <td>{r.description}</td>
                       <td>{ctx.isAdmin ? <button className="btn danger xs" onClick={() => ctx.deleteGroupRule(group.id, i)}>Remove</button> : <span className="hint">—</span>}</td>
                     </tr>
                   ))}
-                  {(group.rules || []).length === 0 ? <tr><td colSpan={5} className="empty">No rules — default deny applies.</td></tr> : null}
+                  {(group.rules || []).length === 0 ? <tr><td colSpan={6} className="empty">No rules — default deny applies.</td></tr> : null}
                 </tbody>
               </table></div>
 
@@ -296,6 +298,7 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                 <div className="rule-grid">
                   <div className="field" style={{ marginBottom: 0 }}><label className="fl">Effect</label><select className="sel" value={eff} onChange={(e) => setEff(e.target.value as 'ALLOW' | 'DENY')}><option>ALLOW</option><option>DENY</option></select></div>
                   <div className="field" style={{ marginBottom: 0 }}><label className="fl">Method</label><select className="sel" value={meth} onChange={(e) => setMeth(e.target.value)}><option value="*">* (All)</option><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option></select></div>
+                  <div className="field" style={{ marginBottom: 0 }}><label className="fl">Server</label><select className="sel" value={svr} onChange={(e) => setSvr(e.target.value)}><option value="">All servers</option>{ctx.servers.map((s) => <option key={s.id} value={s.id}>{s.name || s.slug}</option>)}</select></div>
                   <div className="field" style={{ marginBottom: 0 }}><label className="fl">Path Pattern</label><input className="inp" value={pat} onChange={(e) => setPat(e.target.value)} required /></div>
                 </div>
                 <div className="field" style={{ margin: '14px 0' }}><label className="fl">Description</label><input className="inp" placeholder="e.g. Allows querying job parameters" value={desc} onChange={(e) => setDesc(e.target.value)} /></div>
