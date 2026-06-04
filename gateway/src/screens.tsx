@@ -283,7 +283,7 @@ export function SecurityScreen({ ctx }: { ctx: Ctx }) {
                     <tr key={i}>
                       <td><span className={`tag ${r.effect === 'DENY' ? 'deny' : 'allow'}`}>{r.effect}</span></td>
                       <td><span className={`method ${methodClass(r.method)}`}>{r.method}</span></td>
-                      <td>{r.server_id && r.server_id !== '*' ? <span className="tag group">{r.server_slug || 'server'}</span> : <span className="hint">All</span>}</td>
+                      <td>{r.server_id && r.server_id !== '*' ? <span className={`tag ${r.server_slug ? 'group' : 'muted'}`} title={r.server_slug ? undefined : `server id: ${r.server_id}`}>{r.server_slug || 'unknown'}</span> : <span className="hint">All</span>}</td>
                       <td className="path">{r.path_pattern}</td>
                       <td>{r.description}</td>
                       <td>{ctx.isAdmin ? <button className="btn danger xs" onClick={() => ctx.deleteGroupRule(group.id, i)}>Remove</button> : <span className="hint">—</span>}</td>
