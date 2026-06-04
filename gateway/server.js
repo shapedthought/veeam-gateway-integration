@@ -125,7 +125,7 @@ async function loadVeeamConfigFromDb() {
         veeamConfig.password = decrypted;
         
         // Auto-migration: if the stored database value was legacy plaintext, update it to encrypted format
-        if (decrypted && decrypted === row.value && !row.value.includes(':')) {
+        if (decrypted && row.value.split(':').length !== 3) {
           const encryptedValue = encrypt(decrypted);
           dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue])
             .then(() => console.log('[CONFIG] Legacy plaintext Veeam password automatically migrated to encrypted format in DB.'))
@@ -136,6 +136,54 @@ async function loadVeeamConfigFromDb() {
     console.log('[CONFIG] Veeam connection config loaded from DB. URL:', veeamConfig.url || 'Not set');
   } catch (err) {
     console.error('[CONFIG] Error loading config from DB:', err.message);
+  }
+}
+
+// --- Multi-VBR server model ---
+// Each Veeam Backup & Replication server the gateway can proxy to is a row in
+// veeam_servers. Loaded into memory here; `veeamConfig` above is kept pointed at
+// the default server purely for back-compat with the single-connection code paths.
+let servers = new Map(); // id -> { id, slug, name, url, username, password, apiVersion, isDefault }
+let defaultServerId = null;
+
+function publicServer(s) {
+  return { id: s.id, slug: s.slug, name: s.name, url: s.url, username: s.username, hasPassword: !!s.password, apiVersion: s.apiVersion, isDefault: s.isDefault };
+}
+function getDefaultServer() {
+  return (defaultServerId && servers.get(defaultServerId)) || null;
+}
+function getServerForKey(keyInfo) {
+  if (keyInfo && keyInfo.defaultServerId && servers.has(keyInfo.defaultServerId)) return servers.get(keyInfo.defaultServerId);
+  return getDefaultServer();
+}
+function getServerBySlug(slug) {
+  for (const s of servers.values()) if (s.slug === slug) return s;
+  return null;
+}
+
+async function loadServersFromDb() {
+  try {
+    const rows = await dbAll('SELECT * FROM veeam_servers');
+    const next = new Map();
+    let def = null;
+    for (const r of rows) {
+      const password = decrypt(r.password || '');
+      // Auto-migrate a legacy plaintext password to encrypted-at-rest form. Encrypted
+      // values have the 3-part iv:authTag:ciphertext shape; anything else is plaintext
+      // (key off the part count so passwords containing ':' still get migrated).
+      if (password && (r.password || '').split(':').length !== 3) {
+        dbRun('UPDATE veeam_servers SET password = ? WHERE id = ?', [encrypt(password), r.id]).catch(() => {});
+      }
+      next.set(r.id, { id: r.id, slug: r.slug, name: r.name, url: r.url, username: r.username, password, apiVersion: r.api_version || DEFAULT_VEEAM_API_VERSION, isDefault: !!r.is_default });
+      if (r.is_default) def = r.id;
+    }
+    servers = next;
+    defaultServerId = def || (rows[0] && rows[0].id) || null;
+    const d = getDefaultServer();
+    if (d) veeamConfig = { url: d.url, username: d.username, password: d.password, apiVersion: d.apiVersion };
+    console.log(`[CONFIG] Loaded ${servers.size} Veeam server(s). Default: ${getDefaultServer()?.slug || 'none'}`);
+  } catch (err) {
+    console.error('[CONFIG] Error loading servers from DB:', err.message);
   }
 }
 
@@ -176,6 +224,33 @@ async function initDb() {
 
   // Load configuration into memory
   await loadVeeamConfigFromDb();
+
+  // --- Multi-VBR: servers table (supersedes the single veeam_config) ---
+  await dbRun(`
+    CREATE TABLE IF NOT EXISTS veeam_servers (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT,
+      url TEXT NOT NULL,
+      username TEXT NOT NULL,
+      password TEXT,
+      api_version TEXT NOT NULL DEFAULT '1.3-rev1',
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    )
+  `);
+
+  // One-time migration: fold the existing single connection into a 'default' server.
+  const serverCount = await dbGet('SELECT count(*) as count FROM veeam_servers');
+  if (serverCount.count === 0 && veeamConfig.url) {
+    await dbRun(
+      'INSERT INTO veeam_servers (id, slug, name, url, username, password, api_version, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)',
+      [crypto.randomUUID(), 'default', 'Default', veeamConfig.url, veeamConfig.username, encrypt(veeamConfig.password || ''), veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION, new Date().toISOString()]
+    );
+    console.log('[DB] Migrated existing Veeam connection into a default server');
+  }
+
+  await loadServersFromDb();
 
   // Create Users & Groups tables
   await dbRun(`
@@ -263,9 +338,11 @@ async function initDb() {
   await addColumnIfMissing('api_keys', 'user_id', 'TEXT');
   await addColumnIfMissing('api_keys', 'expires_at', 'TEXT');
   await addColumnIfMissing('api_keys', 'allowed_ips', 'TEXT');
+  await addColumnIfMissing('api_keys', 'default_server_id', 'TEXT');
   await addColumnIfMissing('audit_logs', 'client_ip', 'TEXT');
   await addColumnIfMissing('audit_logs', 'action', 'TEXT');
   await addColumnIfMissing('audit_logs', 'resource', 'TEXT');
+  await addColumnIfMissing('audit_logs', 'server', 'TEXT');
 
   // Seed default admin user
   const userCount = await dbGet('SELECT count(*) as count FROM users');
@@ -415,7 +492,7 @@ function parseVeeamActionAndResource(method, veeamPath) {
 }
 
 // Audit logger helper
-async function logOperation(keyId, keyName, method, path, statusCode, message, req = null) {
+async function logOperation(keyId, keyName, method, path, statusCode, message, req = null, serverLabel = null) {
   const now = new Date().toISOString();
   const clientIp = req ? getClientIp(req) : 'SYSTEM';
 
@@ -425,72 +502,73 @@ async function logOperation(keyId, keyName, method, path, statusCode, message, r
 
   try {
     await dbRun(
-      'INSERT INTO audit_logs (timestamp, key_id, key_name, method, path, status_code, message, client_ip, action, resource) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [now, keyId || 'SYSTEM', keyName || 'SYSTEM', method, path, statusCode, message, clientIp, action, resource]
+      'INSERT INTO audit_logs (timestamp, key_id, key_name, method, path, status_code, message, client_ip, action, resource, server) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [now, keyId || 'SYSTEM', keyName || 'SYSTEM', method, path, statusCode, message, clientIp, action, resource, serverLabel]
     );
   } catch (err) {
     console.error('[LOGGER] Error writing audit log:', err.message);
   }
 }
 
-// --- Veeam API Credentials and Connection Handling ---
-let veeamAccessToken = null;
-let veeamRefreshToken = null;
-let veeamTokenExpiry = 0; // Epoch in ms
+// --- Veeam API token cache (one entry per server) ---
+const veeamTokens = new Map(); // serverId -> { accessToken, refreshToken, expiry }
 
 // Disable SSL rejection for self-signed certificates
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false
 });
 
-async function getVeeamToken() {
-  const now = Date.now();
-  if (veeamAccessToken && veeamTokenExpiry > now + 60000) {
-    return veeamAccessToken;
-  }
+function resetVeeamToken(serverId) {
+  if (serverId) veeamTokens.delete(serverId); else veeamTokens.clear();
+}
 
-  const veeamUrl = veeamConfig.url;
-  const username = veeamConfig.username;
-  const password = veeamConfig.password;
-
-  if (!veeamUrl || !username || !password) {
+async function getVeeamToken(server) {
+  if (!server || !server.url || !server.username || !server.password) {
     throw new Error('Veeam connection settings missing or not configured');
   }
+  const now = Date.now();
+  const cached = veeamTokens.get(server.id);
+  if (cached && cached.accessToken && cached.expiry > now + 60000) {
+    return cached.accessToken;
+  }
 
+  const refreshToken = cached && cached.refreshToken;
   try {
     const params = new URLSearchParams();
-    if (veeamRefreshToken) {
+    if (refreshToken) {
       params.append('grant_type', 'Refresh_token');
-      params.append('refresh_token', veeamRefreshToken);
+      params.append('refresh_token', refreshToken);
     } else {
       params.append('grant_type', 'Password');
-      params.append('username', username);
-      params.append('password', password);
+      params.append('username', server.username);
+      params.append('password', server.password);
     }
 
-    console.log('[VEEAM-AUTH] Authenticating with Veeam API at:', `${veeamUrl}/api/oauth2/token`);
-    const response = await axios.post(`${veeamUrl}/api/oauth2/token`, params, {
+    console.log(`[VEEAM-AUTH] Authenticating with Veeam '${server.slug}' at:`, `${server.url}/api/oauth2/token`);
+    const response = await axios.post(`${server.url}/api/oauth2/token`, params, {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
-        'x-api-version': veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION,
+        'x-api-version': server.apiVersion || DEFAULT_VEEAM_API_VERSION,
       },
       httpsAgent,
       timeout: 5000 // Fail fast if Veeam is unreachable
     });
 
-    veeamAccessToken = response.data.access_token;
-    veeamRefreshToken = response.data.refresh_token;
     const expiresIn = response.data.expires_in || 3600;
-    veeamTokenExpiry = now + expiresIn * 1000;
-    console.log('[VEEAM-AUTH] Token successfully acquired. Expires in:', expiresIn, 'seconds');
-    return veeamAccessToken;
+    veeamTokens.set(server.id, {
+      accessToken: response.data.access_token,
+      refreshToken: response.data.refresh_token,
+      expiry: now + expiresIn * 1000
+    });
+    console.log(`[VEEAM-AUTH] Token acquired for '${server.slug}'. Expires in:`, expiresIn, 'seconds');
+    return response.data.access_token;
   } catch (err) {
-    console.error('[VEEAM-AUTH] Error authenticating with Veeam:', err.response?.data || err.message);
-    if (veeamRefreshToken) {
-      // If refresh failed, clear token and retry using credentials
+    console.error(`[VEEAM-AUTH] Error authenticating with Veeam '${server.slug}':`, err.response?.data || err.message);
+    if (refreshToken) {
+      // Refresh failed — drop it and retry with full credentials.
       console.log('[VEEAM-AUTH] Refresh token failed. Retrying with full credentials.');
-      veeamRefreshToken = null;
-      return getVeeamToken();
+      veeamTokens.delete(server.id);
+      return getVeeamToken(server);
     }
     throw err;
   }
@@ -535,7 +613,7 @@ loadSwaggerRoutes();
 
 // 3. Verify target path is a valid Veeam REST API endpoint pattern
 function validateVeeamEndpoint(req, res, next) {
-  const targetPath = req.path.startsWith('/veeam') ? req.path.substring(6) : req.path;
+  const targetPath = req.veeamPath || (req.path.startsWith('/veeam') ? req.path.substring(6) : req.path);
   const method = req.method.toUpperCase();
 
   if (swaggerRoutes.length === 0) {
@@ -561,6 +639,32 @@ function validateVeeamEndpoint(req, res, next) {
     });
   }
 
+  next();
+}
+
+// Resolve which Veeam server a /veeam/* request targets, plus the Veeam path to forward.
+// First segment 'api' (or empty) -> the key's default server (else the system default);
+// otherwise the first segment is a server slug (real Veeam paths always start with /api).
+function resolveTargetServer(req, res, next) {
+  const afterVeeam = req.path.startsWith('/veeam') ? req.path.substring(6) : req.path;
+  const segs = afterVeeam.split('/').filter(Boolean);
+  if (segs.length === 0) {
+    return res.status(404).json({ error: 'No Veeam path specified' });
+  }
+  let server, veeamPath;
+  if (segs[0] === 'api') {
+    server = getServerForKey(req.keyInfo);
+    veeamPath = afterVeeam;
+  } else {
+    server = getServerBySlug(segs[0]);
+    veeamPath = '/' + segs.slice(1).join('/');
+  }
+  if (!server) {
+    const which = segs[0] === 'api' ? 'default' : `'${segs[0]}'`;
+    return res.status(404).json({ error: `Veeam server ${which} is not configured` });
+  }
+  req.targetServer = server;
+  req.veeamPath = veeamPath;
   next();
 }
 
@@ -624,7 +728,8 @@ async function authenticateApiKey(req, res, next) {
       id: 'env-admin-key',
       name: 'Env Admin',
       userId: 'admin-user-id-000000000000000000000000',
-      role: 'Admin'
+      role: 'Admin',
+      defaultServerId: null
     };
     return next();
   }
@@ -656,7 +761,8 @@ async function authenticateApiKey(req, res, next) {
       id: keyRecord.id,
       name: keyRecord.name,
       userId: keyRecord.user_id,
-      role: keyRecord.role || 'Admin'
+      role: keyRecord.role || 'Admin',
+      defaultServerId: keyRecord.default_server_id || null
     };
     next();
   } catch (err) {
@@ -678,8 +784,8 @@ function pathMatchesPattern(reqPath, pattern) {
 // 2. Validate Access Control Policies (Global & Policy-based Group Rules)
 async function authorizeRequest(req, res, next) {
   const { method, path } = req;
-  // Normalize the proxied Veeam path (strip '/veeam' prefix)
-  const veeamPath = path.startsWith('/veeam') ? path.substring(6) : path;
+  // Normalize the proxied Veeam path (set by resolveTargetServer; fall back to stripping '/veeam')
+  const veeamPath = req.veeamPath || (path.startsWith('/veeam') ? path.substring(6) : path);
   const userId = req.keyInfo.userId;
 
   // 2a. Check Global Rules Blocklist
@@ -756,22 +862,23 @@ async function authorizeRequest(req, res, next) {
 
 // Get Status (Veeam connectivity, settings details)
 app.get('/api/status', authenticateApiKey, async (req, res) => {
+  const d = getDefaultServer();
   const status = {
-    veeamConfigured: !!veeamConfig.url,
-    veeamUrl: veeamConfig.url || 'Not set',
+    veeamConfigured: !!d,
+    veeamUrl: d?.url || 'Not set',
     connectionStatus: 'Disconnected',
     error: null,
   };
 
-  if (veeamConfig.url) {
+  if (d) {
     try {
-      const token = await getVeeamToken();
+      const token = await getVeeamToken(d);
       // Test connectivity by calling Veeam's repositories endpoint (accessible to more roles)
       try {
-        await axios.get(`${veeamConfig.url}/api/v1/backupInfrastructure/repositories?limit=1`, {
+        await axios.get(`${d.url}/api/v1/backupInfrastructure/repositories?limit=1`, {
           headers: {
             'Authorization': `Bearer ${token}`,
-            'x-api-version': veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION,
+            'x-api-version': d.apiVersion || DEFAULT_VEEAM_API_VERSION,
           },
           httpsAgent,
           timeout: 3000 // Check connectivity quickly
@@ -815,9 +922,11 @@ async function checkIsAdmin(req) {
 app.get('/api/keys', authenticateApiKey, async (req, res) => {
   try {
     const keys = await dbAll(`
-      SELECT ak.id, ak.name, ak.token_masked, ak.role, ak.status, ak.expires_at, ak.allowed_ips, ak.created_at, u.username as owner_name 
+      SELECT ak.id, ak.name, ak.token_masked, ak.role, ak.status, ak.expires_at, ak.allowed_ips, ak.created_at,
+             ak.default_server_id, u.username as owner_name, vs.slug as default_server
       FROM api_keys ak
       LEFT JOIN users u ON ak.user_id = u.id
+      LEFT JOIN veeam_servers vs ON ak.default_server_id = vs.id
       ORDER BY ak.created_at DESC
     `);
     res.json(keys);
@@ -832,12 +941,19 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
     return res.status(403).json({ error: 'Only administrators can create API keys' });
   }
 
-  const { name, userId, expiresAt, allowedIps, role } = req.body;
+  const { name, userId, expiresAt, allowedIps, role, defaultServerId } = req.body;
   if (!name || !userId) {
     return res.status(400).json({ error: 'Key Name and User Owner are required' });
   }
   // Default to least-privilege Viewer; only an explicit 'Admin' grants control-plane admin.
   const keyRole = role === 'Admin' ? 'Admin' : 'Viewer';
+  // Optional default VBR — if provided it must be a known server (reject typos rather
+  // than silently falling back to the system default). null = use system default at request time.
+  let keyServerId = null;
+  if (defaultServerId) {
+    if (!servers.has(defaultServerId)) return res.status(400).json({ error: `Unknown defaultServerId '${defaultServerId}'` });
+    keyServerId = defaultServerId;
+  }
 
   try {
     const token = 'veeam_vproxy_' + crypto.randomBytes(24).toString('hex');
@@ -847,8 +963,8 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
     const now = new Date().toISOString();
 
     await dbRun(
-      'INSERT INTO api_keys (id, name, user_id, token_hash, token_masked, role, status, expires_at, allowed_ips, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [keyId, name, userId, tokenHash, tokenMasked, keyRole, 'active', expiresAt || null, allowedIps || null, now]
+      'INSERT INTO api_keys (id, name, user_id, token_hash, token_masked, role, status, expires_at, allowed_ips, default_server_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [keyId, name, userId, tokenHash, tokenMasked, keyRole, 'active', expiresAt || null, allowedIps || null, keyServerId, now]
     );
 
     await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys`, 201, `Created ${keyRole} key: ${name} for user ID: ${userId}`, req);
@@ -862,6 +978,7 @@ app.post('/api/keys', authenticateApiKey, async (req, res) => {
       masked: tokenMasked,
       expires_at: expiresAt || null,
       allowed_ips: allowedIps || null,
+      default_server_id: keyServerId,
       created_at: now
     });
   } catch (err) {
@@ -1147,13 +1264,14 @@ app.get('/api/logs', authenticateApiKey, async (req, res) => {
 
 // Get Veeam Connection Settings (Admin only)
 app.get('/api/config', authenticateApiKey, async (req, res) => {
-  // Read-only: any authenticated key (incl. Viewer) may read connection settings.
+  // Back-compat single-connection view of the DEFAULT server (any authenticated key).
   // The password is never returned — only whether one is set.
+  const d = getDefaultServer();
   res.json({
-    url: veeamConfig.url,
-    username: veeamConfig.username,
-    hasPassword: !!veeamConfig.password,
-    apiVersion: veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION
+    url: d?.url || '',
+    username: d?.username || '',
+    hasPassword: !!d?.password,
+    apiVersion: d?.apiVersion || DEFAULT_VEEAM_API_VERSION
   });
 });
 
@@ -1172,56 +1290,156 @@ app.post('/api/config', authenticateApiKey, async (req, res) => {
     return res.status(400).json({ error: 'URL and Username are required' });
   }
   try {
-    await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_url', url]);
-    await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_username', username]);
-    // API version: fall back to the default if cleared, so a Veeam version bump is just a UI edit.
+    // Back-compat: this edits the DEFAULT server row (creating it if there is none).
     const versionToSave = (apiVersion && apiVersion.trim()) || DEFAULT_VEEAM_API_VERSION;
-    await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_api_version', versionToSave]);
-
-    // Only update password if provided and not masked placeholder
-    if (password && password !== '******') {
-      const encryptedValue = encrypt(password);
-      await dbRun('INSERT OR REPLACE INTO veeam_config (key, value) VALUES (?, ?)', ['veeam_password', encryptedValue]);
+    const d = getDefaultServer();
+    if (d) {
+      const fields = ['url = ?', 'username = ?', 'api_version = ?'];
+      const vals = [url, username, versionToSave];
+      if (password && password !== '******') { fields.push('password = ?'); vals.push(encrypt(password)); }
+      vals.push(d.id);
+      await dbRun(`UPDATE veeam_servers SET ${fields.join(', ')} WHERE id = ?`, vals);
+    } else {
+      await dbRun(
+        'INSERT INTO veeam_servers (id, slug, name, url, username, password, api_version, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)',
+        [crypto.randomUUID(), 'default', 'Default', url, username, encrypt(password && password !== '******' ? password : ''), versionToSave, new Date().toISOString()]
+      );
     }
-    
-    // Reload config in memory
-    await loadVeeamConfigFromDb();
-    
-    // Reset connection token cache to enforce re-auth
-    veeamAccessToken = null;
-    veeamRefreshToken = null;
-    veeamTokenExpiry = 0;
 
-    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', '/api/config', 200, `Updated Veeam connection settings`);
+    await loadServersFromDb();
+    resetVeeamToken(getDefaultServer()?.id); // force re-auth with new settings
+
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', '/api/config', 200, 'Updated default Veeam server settings', req);
     res.json({ message: 'Settings updated successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Proxy Routing: Forward requests to Veeam REST API (V13) ---
-app.all('/veeam/*', authenticateApiKey, validateVeeamEndpoint, authorizeRequest, async (req, res) => {
-  const { method, body, headers } = req;
-  // Extract target path
-  const targetPath = req.path.substring(6); // strips '/veeam' prefix
-  const veeamUrl = veeamConfig.url;
+// --- Veeam Servers (multi-VBR management) ---
 
-  if (!veeamUrl) {
-    return res.status(500).json({ error: 'Veeam connection settings missing or not configured' });
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/i;
+
+// List servers (any authenticated key; passwords never returned)
+app.get('/api/servers', authenticateApiKey, async (req, res) => {
+  res.json([...servers.values()].map(publicServer));
+});
+
+// Test one server's connectivity (any authenticated key) — same probe as /api/status,
+// so admins can validate credentials / reachability before routing to it.
+app.get('/api/servers/:id/status', authenticateApiKey, async (req, res) => {
+  const server = servers.get(req.params.id);
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+  const result = { id: server.id, slug: server.slug, connectionStatus: 'Disconnected', error: null };
+  try {
+    const token = await getVeeamToken(server);
+    try {
+      await axios.get(`${server.url}/api/v1/backupInfrastructure/repositories?limit=1`, {
+        headers: { 'Authorization': `Bearer ${token}`, 'x-api-version': server.apiVersion || DEFAULT_VEEAM_API_VERSION },
+        httpsAgent,
+        timeout: 3000
+      });
+      result.connectionStatus = 'Connected';
+    } catch (pingErr) {
+      // 403 from Veeam still proves we authenticated and reached the server.
+      if (pingErr.response?.status === 403) result.connectionStatus = 'Connected';
+      else throw pingErr;
+    }
+  } catch (err) {
+    result.connectionStatus = 'Error';
+    result.error = err.response?.data?.message || err.message;
   }
+  res.json(result);
+});
+
+// Create a server (Admin)
+app.post('/api/servers', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) return res.status(403).json({ error: 'Only administrators can add servers' });
+  const { slug, name, url, username, password, apiVersion, isDefault } = req.body;
+  if (!slug || !url || !username) return res.status(400).json({ error: 'slug, url and username are required' });
+  if (!SLUG_RE.test(slug) || slug.toLowerCase() === 'api') return res.status(400).json({ error: "slug must be URL-safe and not 'api'" });
+  if (getServerBySlug(slug)) return res.status(409).json({ error: `A server with slug '${slug}' already exists` });
+  try {
+    const id = crypto.randomUUID();
+    const makeDefault = !!isDefault || servers.size === 0; // first server is always the default
+    if (makeDefault) await dbRun('UPDATE veeam_servers SET is_default = 0');
+    await dbRun(
+      'INSERT INTO veeam_servers (id, slug, name, url, username, password, api_version, is_default, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, slug, name || slug, url, username, encrypt(password || ''), (apiVersion && apiVersion.trim()) || DEFAULT_VEEAM_API_VERSION, makeDefault ? 1 : 0, new Date().toISOString()]
+    );
+    await loadServersFromDb();
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', '/api/servers', 201, `Added Veeam server: ${slug}`, req);
+    res.status(201).json(publicServer(servers.get(id)));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update a server (Admin)
+app.put('/api/servers/:id', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) return res.status(403).json({ error: 'Only administrators can edit servers' });
+  const { id } = req.params;
+  const existing = servers.get(id);
+  if (!existing) return res.status(404).json({ error: 'Server not found' });
+  const { slug, name, url, username, password, apiVersion, isDefault } = req.body;
+  if (slug && (!SLUG_RE.test(slug) || slug.toLowerCase() === 'api')) return res.status(400).json({ error: "slug must be URL-safe and not 'api'" });
+  if (slug && slug !== existing.slug && getServerBySlug(slug)) return res.status(409).json({ error: `slug '${slug}' already in use` });
+  try {
+    const fields = [], vals = [];
+    if (slug) { fields.push('slug = ?'); vals.push(slug); }
+    if (name !== undefined) { fields.push('name = ?'); vals.push(name); }
+    if (url) { fields.push('url = ?'); vals.push(url); }
+    if (username) { fields.push('username = ?'); vals.push(username); }
+    if (apiVersion) { fields.push('api_version = ?'); vals.push(apiVersion.trim()); }
+    if (password && password !== '******') { fields.push('password = ?'); vals.push(encrypt(password)); }
+    if (fields.length) { vals.push(id); await dbRun(`UPDATE veeam_servers SET ${fields.join(', ')} WHERE id = ?`, vals); }
+    if (isDefault) { await dbRun('UPDATE veeam_servers SET is_default = 0'); await dbRun('UPDATE veeam_servers SET is_default = 1 WHERE id = ?', [id]); }
+    await loadServersFromDb();
+    resetVeeamToken(id); // creds/version may have changed
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'PUT', `/api/servers/${id}`, 200, `Updated Veeam server: ${slug || existing.slug}`, req);
+    res.json(publicServer(servers.get(id)));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a server (Admin)
+app.delete('/api/servers/:id', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) return res.status(403).json({ error: 'Only administrators can delete servers' });
+  const { id } = req.params;
+  const existing = servers.get(id);
+  if (!existing) return res.status(404).json({ error: 'Server not found' });
+  if (existing.isDefault && servers.size > 1) return res.status(400).json({ error: 'Cannot delete the default server; set another server as default first' });
+  try {
+    await dbRun('DELETE FROM veeam_servers WHERE id = ?', [id]);
+    resetVeeamToken(id);
+    await loadServersFromDb();
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'DELETE', `/api/servers/${id}`, 200, `Deleted Veeam server: ${existing.slug}`, req);
+    res.json({ message: 'Server deleted' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Proxy Routing: Forward requests to Veeam REST API (V13) ---
+app.all('/veeam/*', authenticateApiKey, resolveTargetServer, validateVeeamEndpoint, authorizeRequest, async (req, res) => {
+  const { method, body, headers } = req;
+  const server = req.targetServer;        // resolved by resolveTargetServer
+  const targetPath = req.veeamPath;        // Veeam path with any server slug stripped
+  const serverLabel = server.name || server.slug;
 
   try {
-    const token = await getVeeamToken();
+    const token = await getVeeamToken(server);
     const proxyHeaders = {
       'Authorization': `Bearer ${token}`,
-      'x-api-version': veeamConfig.apiVersion || DEFAULT_VEEAM_API_VERSION,
+      'x-api-version': server.apiVersion || DEFAULT_VEEAM_API_VERSION,
       'Content-Type': headers['content-type'] || 'application/json',
       'Accept': headers['accept'] || 'application/json',
     };
 
     const config = {
       method,
-      url: `${veeamUrl}${targetPath}`,
+      url: `${server.url}${targetPath}`,
       headers: proxyHeaders,
       data: body,
       params: req.query,
@@ -1230,15 +1448,11 @@ app.all('/veeam/*', authenticateApiKey, validateVeeamEndpoint, authorizeRequest,
     };
 
     const response = await axios(config);
-    
-    // Log the successful transaction
+
+    // Log the transaction (incl. which Veeam server it hit)
     await logOperation(
-      req.keyInfo.id,
-      req.keyInfo.name,
-      method,
-      targetPath,
-      response.status,
-      `Forwarded: ${response.statusText || 'OK'}`
+      req.keyInfo.id, req.keyInfo.name, method, targetPath, response.status,
+      `Forwarded to ${serverLabel}: ${response.statusText || 'OK'}`, req, serverLabel
     );
 
     // Forward headers & status code
@@ -1249,17 +1463,13 @@ app.all('/veeam/*', authenticateApiKey, validateVeeamEndpoint, authorizeRequest,
     res.send(response.data);
 
   } catch (err) {
-    console.error(`[PROXY-ERROR] ${method} ${targetPath}:`, err.message);
+    console.error(`[PROXY-ERROR] ${method} ${serverLabel} ${targetPath}:`, err.message);
     const errStatus = err.response?.status || 502;
     const errMsg = err.response?.data || { error: err.message };
 
     await logOperation(
-      req.keyInfo.id,
-      req.keyInfo.name,
-      method,
-      targetPath,
-      errStatus,
-      `Proxy failed: ${err.message}`
+      req.keyInfo.id, req.keyInfo.name, method, targetPath, errStatus,
+      `Proxy to ${serverLabel} failed: ${err.message}`, req, serverLabel
     );
 
     res.status(errStatus).json(errMsg);
