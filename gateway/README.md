@@ -21,6 +21,7 @@ ENCRYPTION_KEY=my_secure_symmetric_encryption_key_here
 > - The `VEEAM_*` values seed the **default** Veeam server on first run only; afterwards servers are managed in the dashboard, and you can add more (see *Managing multiple Veeam servers* below). `VEEAM_API_VERSION` is optional and defaults to `1.3-rev1`.
 > - If you omit `ADMIN_API_KEY`, a random one will be generated at startup and printed to the container logs (`docker logs veeam-gateway`).
 > - The `ENCRYPTION_KEY` is optional but highly recommended to encrypt stored passwords in the SQLite database. If omitted, the `ADMIN_API_KEY` (or a static default) is used as a fallback.
+> - Revoked API keys can be removed from the dashboard (per-key **Delete**, or **Clear revoked** in bulk) and are auto-purged on startup after `REVOKED_KEY_RETENTION_DAYS` days (optional, default `30`).
 
 ---
 
