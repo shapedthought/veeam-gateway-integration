@@ -106,6 +106,15 @@ const dbGet = (query, params = []) => {
 
 // --- Veeam Connection Configuration in DB ---
 const DEFAULT_VEEAM_API_VERSION = '1.3-rev1';
+// Revoked API keys are auto-purged after this many days (override via env).
+// Guard against bad env values (non-numeric → NaN throws later; negative → would
+// purge everything): fall back to 30 unless it's a finite, non-negative number.
+const REVOKED_KEY_RETENTION_DAYS = (() => {
+  const n = parseInt(process.env.REVOKED_KEY_RETENTION_DAYS ?? '30', 10);
+  if (Number.isFinite(n) && n >= 0) return n;
+  if (process.env.REVOKED_KEY_RETENTION_DAYS) console.warn(`[CONFIG] Invalid REVOKED_KEY_RETENTION_DAYS='${process.env.REVOKED_KEY_RETENTION_DAYS}', using 30.`);
+  return 30;
+})();
 let veeamConfig = {
   url: process.env.VEEAM_API_URL || '',
   username: process.env.VEEAM_USERNAME || '',
@@ -339,6 +348,7 @@ async function initDb() {
   await addColumnIfMissing('api_keys', 'expires_at', 'TEXT');
   await addColumnIfMissing('api_keys', 'allowed_ips', 'TEXT');
   await addColumnIfMissing('api_keys', 'default_server_id', 'TEXT');
+  await addColumnIfMissing('api_keys', 'revoked_at', 'TEXT');
   await addColumnIfMissing('audit_logs', 'client_ip', 'TEXT');
   await addColumnIfMissing('audit_logs', 'action', 'TEXT');
   await addColumnIfMissing('audit_logs', 'resource', 'TEXT');
@@ -425,6 +435,15 @@ async function initDb() {
     console.log(`[SETUP] Token   : ${defaultToken}`);
     console.log('[SETUP] IMPORTANT: Copy this token now. It will not be shown again.');
     console.log('==================================================\n');
+  }
+
+  // Auto-purge revoked API keys past the retention window so they don't pile up.
+  try {
+    const cutoff = new Date(Date.now() - REVOKED_KEY_RETENTION_DAYS * 86400000).toISOString();
+    const purged = await dbRun("DELETE FROM api_keys WHERE status = 'revoked' AND COALESCE(revoked_at, created_at) < ?", [cutoff]);
+    if (purged.changes) console.log(`[DB] Purged ${purged.changes} revoked API key(s) older than ${REVOKED_KEY_RETENTION_DAYS} days`);
+  } catch (err) {
+    console.warn('[DB] Revoked-key purge skipped:', err.message);
   }
 }
 
@@ -1008,9 +1027,44 @@ app.post('/api/keys/:id/revoke', authenticateApiKey, async (req, res) => {
       return res.status(404).json({ error: 'Key not found' });
     }
 
-    await dbRun("UPDATE api_keys SET status = 'revoked' WHERE id = ?", [id]);
+    await dbRun("UPDATE api_keys SET status = 'revoked', revoked_at = ? WHERE id = ?", [new Date().toISOString(), id]);
     await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', `/api/keys/${id}/revoke`, 200, `Revoked key: ${key.name}`, req);
     res.json({ message: 'Key successfully revoked' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk-delete all revoked keys (Admin) — clears the accumulated backlog in one call.
+app.post('/api/keys/clear-revoked', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can delete API keys' });
+  }
+  try {
+    const result = await dbRun("DELETE FROM api_keys WHERE status = 'revoked'");
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'POST', '/api/keys/clear-revoked', 200, `Cleared ${result.changes} revoked key(s)`, req);
+    res.json({ deleted: result.changes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Permanently delete a single key (Admin). Used to remove revoked keys; cannot delete
+// the credentials making this request.
+app.delete('/api/keys/:id', authenticateApiKey, async (req, res) => {
+  if (!(await checkIsAdmin(req))) {
+    return res.status(403).json({ error: 'Only administrators can delete API keys' });
+  }
+  const { id } = req.params;
+  if (id === req.keyInfo.id) {
+    return res.status(400).json({ error: 'Cannot delete the active credentials used to make this request' });
+  }
+  try {
+    const key = await dbGet('SELECT name FROM api_keys WHERE id = ?', [id]);
+    if (!key) return res.status(404).json({ error: 'Key not found' });
+    await dbRun('DELETE FROM api_keys WHERE id = ?', [id]);
+    await logOperation(req.keyInfo.id, req.keyInfo.name, 'DELETE', `/api/keys/${id}`, 200, `Deleted key: ${key.name}`, req);
+    res.json({ message: 'Key deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

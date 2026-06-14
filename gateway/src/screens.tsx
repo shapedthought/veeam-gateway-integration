@@ -119,10 +119,11 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
   const [keySvr, setKeySvr] = useState(''); // '' = system default VBR
   const submit = (e: FormEvent) => { e.preventDefault(); if (!name.trim()) return; ctx.createKey({ name, userId, ips, exp, role, defaultServerId: keySvr }); setName(''); setIps(''); setExp(''); setRole('Viewer'); setKeySvr(''); setOpen(false); };
   const noUsers = ctx.users.length === 0;
+  const revokedCount = ctx.keys.filter((k) => k.status === 'revoked').length;
   return (
     <>
       <div className="card">
-        <div className="panel-head"><h2>API Credentials <span className="sub" style={{ marginLeft: 8 }}>{ctx.keys.length} total</span></h2>{ctx.isAdmin ? <button className="btn primary sm" disabled={noUsers} onClick={() => setOpen(true)}><Icon name="key" size={15} />Issue Token</button> : null}</div>
+        <div className="panel-head"><h2>API Credentials <span className="sub" style={{ marginLeft: 8 }}>{ctx.keys.length} total</span></h2>{ctx.isAdmin ? <div className="row-actions">{revokedCount > 0 ? <button className="btn ghost sm" onClick={() => ctx.clearRevokedKeys()}>Clear revoked ({revokedCount})</button> : null}<button className="btn primary sm" disabled={noUsers} onClick={() => setOpen(true)}><Icon name="key" size={15} />Issue Token</button></div> : null}</div>
         <div className="tbl-wrap"><table className="tbl">
           <thead><tr><th>Name</th><th>Owner</th><th>Role</th><th>Default VBR</th><th>Allowed IPs</th><th>Expires</th><th>Token</th><th>Status</th><th></th></tr></thead>
           <tbody>
@@ -136,7 +137,11 @@ export function KeysScreen({ ctx }: { ctx: Ctx }) {
                 <td className="mono-cell">{k.expires_at ? <span style={{ color: new Date(k.expires_at) < new Date() ? 'var(--danger)' : 'inherit' }}>{fmtDate(k.expires_at)}</span> : 'Never'}</td>
                 <td className="mono-cell">{k.token_masked}</td>
                 <td><span className={`status-live ${k.status}`}><span className="dot" style={{ background: k.status === 'active' ? 'var(--ok)' : 'var(--text-subtle)' }}></span>{k.status === 'active' ? 'Active' : 'Revoked'}</span></td>
-                <td>{ctx.isAdmin && k.status === 'active' ? <button className="btn danger xs" onClick={() => ctx.revokeKey(k.id)}>Revoke</button> : <span className="hint">—</span>}</td>
+                <td>{ctx.isAdmin
+                  ? (k.status === 'active'
+                      ? <button className="btn danger xs" onClick={() => ctx.revokeKey(k.id)}>Revoke</button>
+                      : <button className="btn ghost xs" onClick={() => ctx.deleteKey(k.id)}>Delete</button>)
+                  : <span className="hint">—</span>}</td>
               </tr>
             ))}
             {ctx.keys.length === 0 ? <tr><td colSpan={9} className="empty">No API keys issued yet.</td></tr> : null}

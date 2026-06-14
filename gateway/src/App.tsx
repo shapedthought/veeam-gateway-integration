@@ -142,6 +142,19 @@ export default function App() {
       const res = await post(`keys/${id}/revoke`, {}, 'Key revoked');
       if (res) fetchData();
     },
+    deleteKey: async (id) => {
+      if (!confirm('Permanently delete this revoked key from the list?')) return;
+      try {
+        const res = await fetch(getApiUrl(`keys/${id}`), { method: 'DELETE', headers: jsonHeaders() });
+        if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error || 'Failed to delete key'); return; }
+        toast('Key deleted'); fetchData();
+      } catch (err) { alert(errMsg(err)); }
+    },
+    clearRevokedKeys: async () => {
+      if (!confirm('Delete all revoked keys from the list?')) return;
+      const res = await post('keys/clear-revoked', {});
+      if (res) { const d = await res.json().catch(() => ({})); toast(`Cleared ${d.deleted ?? 0} revoked key(s)`); fetchData(); }
+    },
     createUser: async ({ name, email, gids }) => {
       const res = await post('users', { username: name, email, groupIds: gids }, 'User created');
       if (res) fetchData();

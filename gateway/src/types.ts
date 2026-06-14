@@ -106,6 +106,8 @@ export interface Ctx {
   go: (tab: TabId) => void;
   createKey: (data: { name: string; userId: string; ips: string; exp: string; role: 'Admin' | 'Viewer'; defaultServerId: string }) => void;
   revokeKey: (id: string) => void;
+  deleteKey: (id: string) => void;
+  clearRevokedKeys: () => void;
   createUser: (data: { name: string; email: string; gids: string[] }) => void;
   deleteUser: (id: string) => void;
   openUserGroups: (user: User) => void;
