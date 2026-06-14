@@ -107,7 +107,14 @@ const dbGet = (query, params = []) => {
 // --- Veeam Connection Configuration in DB ---
 const DEFAULT_VEEAM_API_VERSION = '1.3-rev1';
 // Revoked API keys are auto-purged after this many days (override via env).
-const REVOKED_KEY_RETENTION_DAYS = parseInt(process.env.REVOKED_KEY_RETENTION_DAYS || '30', 10);
+// Guard against bad env values (non-numeric → NaN throws later; negative → would
+// purge everything): fall back to 30 unless it's a finite, non-negative number.
+const REVOKED_KEY_RETENTION_DAYS = (() => {
+  const n = parseInt(process.env.REVOKED_KEY_RETENTION_DAYS ?? '30', 10);
+  if (Number.isFinite(n) && n >= 0) return n;
+  if (process.env.REVOKED_KEY_RETENTION_DAYS) console.warn(`[CONFIG] Invalid REVOKED_KEY_RETENTION_DAYS='${process.env.REVOKED_KEY_RETENTION_DAYS}', using 30.`);
+  return 30;
+})();
 let veeamConfig = {
   url: process.env.VEEAM_API_URL || '',
   username: process.env.VEEAM_USERNAME || '',
